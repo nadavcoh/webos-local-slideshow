@@ -1,0 +1,156 @@
+name: Deploy Ambient Photos to webOS TV
+
+# Runs on every push to main that touches the app, plus manual triggers
+# from the Actions tab for one-off redeploys.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/index.html"
+      - "src/app.js"
+      - "src/style.css"
+      - "src/appinfo.json"
+      - "src/icon.png"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # ----------------------------------------------------------------
+      # 1. Join the tailnet so this runner can reach the TV's LAN address.
+      #
+      #    IMPORTANT: webOS itself has no Tailscale client, so the TV is
+      #    never a tailnet node on its own. This step only gets the
+      #    *runner* onto your network. For it to actually reach the TV
+      #    you also need ONE of:
+      #      a) a subnet router already advertising your home LAN's CIDR
+      #         (e.g. a Pi, NAS, or router running
+      #         `tailscale up --advertise-routes=192.168.1.0/24`), with
+      #         that route approved in the Tailscale admin console, or
+      #      b) a self-hosted runner that's already physically on the
+      #         same LAN as the TV (see the commented-out `runs-on` note
+      #         at the top of this job if you go that route instead).
+      # ----------------------------------------------------------------
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:github-actions
+          version: latest
+
+      - name: Confirm the TV is reachable
+        run: tailscale ping --c 2 --until-direct=false "${{ secrets.WEBOS_TV_HOST }}"
+      - name: Confirm the TV is reachable
+        run: ping -c 2 "${{ secrets.WEBOS_TV_HOST }}"
+
+      # ----------------------------------------------------------------
+      # 2. Package the app
+      # ----------------------------------------------------------------
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Install webOS CLI
+        run: npm install -g @webos-tools/cli
+
+      # ----------------------------------------------------------------
+      # Inject secrets into the source tree right before packaging, so
+      # the repo itself only ever contains placeholder values:
+      #   src/app.js       → CONFIG.PAIRING_BACKEND_URL / PAIRING_SHARED_SECRET
+      #   src/appinfo.json → "id", "vendor"
+      # There's no Google client ID/secret to inject here anymore —
+      # those live only in the pairing-backend/ deployment's own env
+      # vars (see pairing-backend/README.md), never in this app.
+      # "vendor" is dropped in automatically from the repo owner, no
+      # secret needed for it.
+      # Fails loudly if a placeholder has drifted (e.g. someone edited
+      # app.js and the literal strings no longer match).
+      # ----------------------------------------------------------------
+      - name: Inject config into app.js and appinfo.json
+        env:
+          PAIRING_BACKEND_URL: ${{ secrets.PAIRING_BACKEND_URL }}
+          PAIRING_SHARED_SECRET: ${{ secrets.PAIRING_SHARED_SECRET }}
+          WEBOS_APP_ID: ${{ secrets.WEBOS_APP_ID }}
+          WEBOS_VENDOR: ${{ github.repository_owner }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const replacements = {
+              "https://YOUR-PAIRING-BACKEND.vercel.app": process.env.PAIRING_BACKEND_URL,
+              "YOUR_PAIRING_SHARED_SECRET": process.env.PAIRING_SHARED_SECRET,
+            };
+            let js = fs.readFileSync("src/app.js", "utf8");
+            for (const [placeholder, value] of Object.entries(replacements)) {
+              if (!js.includes(placeholder)) {
+                console.error(`Placeholder not found in app.js: ${placeholder} — did CONFIG change?`);
+                process.exit(1);
+              }
+              js = js.split(placeholder).join(value);
+            }
+            fs.writeFileSync("src/app.js", js);
+          '
+          jq --arg id "$WEBOS_APP_ID" --arg vendor "$WEBOS_VENDOR" \
+            '.id = $id | .vendor = $vendor' src/appinfo.json > src/appinfo.json.tmp
+          mv src/appinfo.json.tmp src/appinfo.json
+
+      - name: Package ipk
+        run: >
+          ares-package src
+          --no-minify
+          --app-exclude secrets.local.js
+          --app-exclude secrets.local.js.example
+
+      - name: Locate built ipk
+        id: ipk
+        run: echo "path=$(ls ./*.ipk | head -n1)" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------
+      # 3. Register the TV as a deploy target and install
+      #
+      #    Auth uses a novacom SSH keypair generated once, locally, via
+      #    ares-setup-device + ares-novacom --getkey (see README.md for
+      #    the exact commands and current key path — @webos-tools/cli
+      #    stores it under ~/.ssh/<device-name>/webos_rsa, not the old
+      #    ~/.novacom-cert/ path from earlier ares-cli versions), then
+      #    base64'd into the WEBOS_TV_SSH_KEY_B64 secret below.
+      #    Developer Mode's passphrase itself expires quickly, but the
+      #    derived private key keeps working as long as Developer Mode
+      #    stays active/extended on the TV (re-extend it every couple of
+      #    days in the Developer Mode app, or it'll need re-pairing).
+      # ----------------------------------------------------------------
+      - name: Restore novacom key
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "${{ secrets.WEBOS_TV_SSH_KEY_B64 }}" | base64 -d > "$HOME/.ssh/webos_rsa"
+          chmod 600 "$HOME/.ssh/webos_rsa"
+
+      - name: Register TV device profile
+        run: |  
+          ares-setup-device --add livingroom-tv \
+            -i "host=${{ secrets.WEBOS_TV_HOST }}" \
+            -i "port=9922" \
+            -i "username=prisoner" \
+            -i "privatekey=webos_rsa" \
+            -i "passphrase=${{ secrets.TV_PASSPHRASE }}"
+          ares-setup-device --listfull
+
+      - name: Install to TV
+        run: ares-install -d livingroom-tv "${{ steps.ipk.outputs.path }}"
+
+      # - name: Relaunch app
+      #   run: ares-launch -d livingroom-tv "${{ secrets.WEBOS_APP_ID }}"
+
+# ----------------------------------------------------------------------
+# Alternative if you don't want to run a subnet router: self-host the
+# runner on a machine already on the TV's LAN (a home server, NUC, etc.)
+# and swap the `runs-on: ubuntu-latest` above for:
+#   runs-on: self-hosted
+# The Tailscale step above then becomes optional — you'd only need it if
+# that self-hosted box itself isn't already on the LAN.
+# ----------------------------------------------------------------------

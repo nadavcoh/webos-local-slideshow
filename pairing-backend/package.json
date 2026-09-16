@@ -1,0 +1,9 @@
+{
+  "name": "webos-photos-pairing-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bridges a standard Google OAuth Authorization Code flow (needed for the Photos Picker API scope, which isn't allowed over the Device Authorization Grant) to a TV app via short-lived pairing codes.",
+  "dependencies": {
+    "@vercel/kv": "^1.0.1"
+  }
+}

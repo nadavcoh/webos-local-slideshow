@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=1920, height=1080, user-scalable=no" />
+  <title>Ambient Photos</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ============================================================
+       PAIRING SCREEN
+       Shown on first run (no stored refresh token / Picker session)
+       and again if either becomes invalid. One QR takes the user
+       through sign-in AND photo selection in one continuous phone
+       flow (handled by the pairing-backend/ service); a fallback QR
+       appears only if we already have a Picker session that isn't
+       finished yet, e.g. the phone's auto-redirect into the picker
+       didn't happen.
+       ============================================================ -->
+  <div id="pairing-screen" class="screen hidden">
+    <div class="pairing-card">
+      <h1 class="pairing-title">Ambient Photos</h1>
+
+      <div id="pairing-step-connect" class="pairing-step">
+        <p class="pairing-instructions">
+          On your phone, scan this to sign in and choose photos:
+        </p>
+        <div id="connect-qr" class="pairing-qr"></div>
+        <p class="pairing-url" id="connect-url">&nbsp;</p>
+        <p class="pairing-status" id="connect-status">Preparing&hellip;</p>
+      </div>
+
+      <div id="pairing-step-media-fallback" class="pairing-step hidden">
+        <p class="pairing-instructions">
+          Still need to pick your photos? Open this on your phone:
+        </p>
+        <div id="media-qr" class="pairing-qr"></div>
+        <p class="pairing-url" id="media-url">&nbsp;</p>
+      </div>
+
+      <div id="pairing-error" class="pairing-error hidden"></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       SLIDESHOW VIEW
+       Two stacked <img> layers are cross-faded between; only one
+       is ever visible/opaque at a time. This avoids any flash of
+       blank screen between images.
+       ============================================================ -->
+  <div id="slideshow-screen" class="screen hidden">
+    <img id="layer-a" class="photo-layer" alt="" />
+    <img id="layer-b" class="photo-layer" alt="" />
+    <div class="vignette"></div>
+    <div id="overlay" class="overlay">
+      <span id="overlay-date"></span>
+    </div>
+
+    <!-- Hidden until any remote button is pressed during playback.
+         Left/Right (or Up/Down) moves focus, OK activates the focused
+         button natively, Back/Escape dismisses, and it auto-hides after
+         a few seconds of inactivity either way. -->
+    <div id="menu-overlay" class="menu-overlay hidden">
+      <div class="menu-card">
+        <button id="menu-repick" class="menu-btn" type="button">Repick Photos</button>
+        <button id="menu-logout" class="menu-btn" type="button">Log Out</button>
+      </div>
+      <p class="menu-hint">&larr; &rarr; to choose &nbsp;&middot;&nbsp; OK to select &nbsp;&middot;&nbsp; Back to dismiss</p>
+    </div>
+  </div>
+
+  <!-- Invisible 1x1, silently looping video. webOS's screensaver
+       explicitly exempts active video playback (see appinfo.json's
+       "enablePigScreenSaver" docs) — unlike the tvpower Luna service,
+       this needs no special permission a third-party .ipk might lack. -->
+  <video id="keepalive" src="keepalive.mp4" muted autoplay loop playsinline></video>
+
+  <div id="boot-screen" class="screen">
+    <div class="boot-spinner"></div>
+  </div>
+
+  <!-- Tiny QR renderer -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- Local-only overrides for PAIRING_BACKEND_URL / PAIRING_SHARED_SECRET
+       when testing with `npx serve .`. Copy secrets.local.js.example to
+       secrets.local.js (gitignored) and fill in real values. Harmlessly
+       404s if that file doesn't exist — app.js just falls back to its
+       placeholder strings, which the GitHub Action fills in for real
+       builds. Never packaged into the .ipk (see the ares-package
+       --app-exclude flags in README.md). -->
+  <script src="secrets.local.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
