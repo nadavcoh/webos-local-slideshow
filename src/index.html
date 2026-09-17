@@ -10,13 +10,13 @@
 
   <!-- ============================================================
        PAIRING SCREEN
-       Shown on first run (no stored refresh token / Picker session)
-       and again if either becomes invalid. One QR takes the user
-       through sign-in AND photo selection in one continuous phone
-       flow (handled by the pairing-backend/ service); a fallback QR
-       appears only if we already have a Picker session that isn't
-       finished yet, e.g. the phone's auto-redirect into the picker
-       didn't happen.
+       Shown on first run (no persisted Supabase session) and again
+       if the session is ever cleared (Log Out, or an invalid/expired
+       refresh token). The QR sends the phone to this app's own
+       Next.js web app's /tv-login page, which handles GitHub SSO via
+       Supabase and hands the resulting tokens back to us via the
+       tv-poll endpoint. There's no picker/media-selection step
+       anymore — photos come from the wa/hashes tables directly.
        ============================================================ -->
   <div id="pairing-screen" class="screen hidden">
     <div class="pairing-card">
@@ -24,19 +24,11 @@
 
       <div id="pairing-step-connect" class="pairing-step">
         <p class="pairing-instructions">
-          On your phone, scan this to sign in and choose photos:
+          On your phone, scan this to connect your account:
         </p>
         <div id="connect-qr" class="pairing-qr"></div>
         <p class="pairing-url" id="connect-url">&nbsp;</p>
         <p class="pairing-status" id="connect-status">Preparing&hellip;</p>
-      </div>
-
-      <div id="pairing-step-media-fallback" class="pairing-step hidden">
-        <p class="pairing-instructions">
-          Still need to pick your photos? Open this on your phone:
-        </p>
-        <div id="media-qr" class="pairing-qr"></div>
-        <p class="pairing-url" id="media-url">&nbsp;</p>
       </div>
 
       <div id="pairing-error" class="pairing-error hidden"></div>
@@ -54,19 +46,18 @@
     <img id="layer-b" class="photo-layer" alt="" />
     <div class="vignette"></div>
     <div id="overlay" class="overlay">
-      <span id="overlay-date"></span>
+      <span id="overlay-date" class="overlay-date"></span>
+      <span id="overlay-location" class="overlay-location"></span>
     </div>
 
     <!-- Hidden until any remote button is pressed during playback.
-         Left/Right (or Up/Down) moves focus, OK activates the focused
-         button natively, Back/Escape dismisses, and it auto-hides after
-         a few seconds of inactivity either way. -->
+         Back/Escape dismisses, and it auto-hides after a few seconds
+         of inactivity either way. OK activates natively. -->
     <div id="menu-overlay" class="menu-overlay hidden">
       <div class="menu-card">
-        <button id="menu-repick" class="menu-btn" type="button">Repick Photos</button>
         <button id="menu-logout" class="menu-btn" type="button">Log Out</button>
       </div>
-      <p class="menu-hint">&larr; &rarr; to choose &nbsp;&middot;&nbsp; OK to select &nbsp;&middot;&nbsp; Back to dismiss</p>
+      <p class="menu-hint">OK to select &nbsp;&middot;&nbsp; Back to dismiss</p>
     </div>
   </div>
 
@@ -82,12 +73,17 @@
 
   <!-- Tiny QR renderer -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <!-- Local-only overrides for PAIRING_BACKEND_URL / PAIRING_SHARED_SECRET
-       when testing with `npx serve .`. Copy secrets.local.js.example to
-       secrets.local.js (gitignored) and fill in real values. Harmlessly
-       404s if that file doesn't exist — app.js just falls back to its
-       placeholder strings, which the GitHub Action fills in for real
-       builds. Never packaged into the .ipk (see the ares-package
+  <!-- Supabase JS, UMD build — exposes window.supabase.createClient.
+       No bundler/ES-modules step in this plain webOS app, so the CDN
+       build (not the npm package) is the right fit here. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Local-only overrides for WEBAPP_URL / SUPABASE_URL /
+       SUPABASE_ANON_KEY / PHOTO_SERVER_URL when testing with
+       `npx serve .`. Copy secrets.local.js.example to secrets.local.js
+       (gitignored) and fill in real values. Harmlessly 404s if that
+       file doesn't exist — app.js just falls back to its placeholder
+       strings, which the GitHub Action fills in for real builds.
+       Never packaged into the .ipk (see the ares-package
        --app-exclude flags in README.md). -->
   <script src="secrets.local.js"></script>
   <script src="app.js"></script>

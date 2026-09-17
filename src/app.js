@@ -2,46 +2,42 @@
  * Ambient Photos — app.js
  *
  * Flow:
- *   1. If we have a stored refresh token AND Picker session id, use
- *      the pairing backend to refresh an access token silently and
- *      check whether that session still has media sources set.
- *   2. Otherwise run the pairing flow: show one QR code linking to
- *      the pairing backend's /api/start?state=<code>&key=<shared
- *      secret>. That backend handles the full Google OAuth
- *      Authorization Code exchange (server-side, so the client secret
- *      never lives in this app), creates a Picker session, and hands
- *      both back to us once the user finishes on their phone. We poll
- *      /api/poll for this.
- *   3. If the Picker session isn't done yet (mediaItemsSet false) —
- *      normally the phone is auto-redirected straight into it by the
- *      backend, but just in case, show a fallback QR/link to the
- *      session's own pickerUri and keep polling.
- *   4. Once media sources are set, list curated media items and
- *      start the slideshow. Base URLs (the actual image bytes)
- *      expire after ~60 minutes, so the media list is silently
- *      re-fetched on a timer without interrupting playback.
+ *   1. On load, check for a persisted Supabase session (supabase-js
+ *      handles this itself via localStorage — see CONFIG.SUPABASE_*
+ *      client options below). If one exists, skip straight to the
+ *      slideshow.
+ *   2. Otherwise run the pairing flow: generate a UUID, show a QR
+ *      pointing at the web app's /tv-login?session=<uuid> page, and
+ *      poll that web app's /api/auth/tv-poll endpoint every few
+ *      seconds. The phone completes GitHub SSO via Supabase there and
+ *      hands the resulting access/refresh tokens back through a
+ *      short-lived Vercel KV record, keyed by that same UUID.
+ *   3. Once tokens arrive, hydrate a local Supabase session with
+ *      supabase.auth.setSession(). From here on, supabase-js manages
+ *      token refresh on its own.
+ *   4. Slideshow photos are NOT a pre-fetched playlist. Each slide
+ *      queries the `wa` table for one random eligible row, joins
+ *      against `hashes` for filename/location/timestamp, and builds
+ *      the image URL against the local photo HTTP server. A small
+ *      in-memory history buffer makes manual Left/Right (prev/next)
+ *      navigation possible despite each photo being fetched fresh.
  *
  * CONFIG VALUES: loaded from window.APP_CONFIG if present (see
  * secrets.local.js.example — copy it to secrets.local.js, gitignored,
  * for local testing with `npx serve .` from this directory), else
  * fall back to the placeholder strings below, which the GitHub Action
  * substitutes at build time. Either way, nothing sensitive is
- * committed to the repo.
+ * committed to the repo. The Supabase anon key is the one exception
+ * to "sensitive" — it's meant to be public/embedded client-side, same
+ * as photo-match-next; RLS policies on wa/hashes do the actual
+ * access control (see README.md for the policies this app needs).
  *
- * IMPORTANT — read the README before running this:
- *   Two other approaches were tried and rejected before landing here:
- *     - `mediaItems:search` (Library API) stopped supporting general
- *       library search on April 1, 2025.
- *     - The Photos Ambient API (a better architectural fit — a
- *       persistent device + ongoing curated feed) requires acceptance
- *       into Google's Photos Partner Program; it's not self-serve.
- *   The Picker API works without any partner approval, but its scope
- *   isn't on Google's allow-list for the Device Authorization Grant
- *   (requesting it returns `invalid_scope`). So OAuth consent has to
- *   go through a standard Authorization Code flow instead, which
- *   needs a real HTTPS redirect URI — hence the small pairing-backend/
- *   service this app now talks to instead of Google directly for
- *   anything auth-related. See README.md and pairing-backend/README.md.
+ * SECURITY MODEL CHANGE from the old pairing-backend: there's no
+ * shared secret gating the pairing URL anymore. A stranger who finds
+ * this TV's QR/URL can only reach the GitHub sign-in page — the
+ * web app's tv-handoff endpoint rejects anyone whose GitHub-verified
+ * email isn't the one allowed address, so getting to that page buys
+ * them nothing.
  * ============================================================ */
 
 /* ---------------------- CONFIG ---------------------- */
@@ -49,38 +45,42 @@
 const localConfig = (typeof window !== "undefined" && window.APP_CONFIG) || {};
 
 const CONFIG = {
-  // Base URL of the deployed pairing-backend/ service, no trailing
-  // slash. There is no Google client ID/secret in this file at all —
-  // those live server-side in the pairing backend.
-  PAIRING_BACKEND_URL: localConfig.PAIRING_BACKEND_URL || "https://YOUR-PAIRING-BACKEND.vercel.app",
+  // Base URL of the deployed Next.js web app (tv-handoff/tv-poll/tv-login).
+  WEBAPP_URL: localConfig.WEBAPP_URL || "https://YOUR-WEBAPP.vercel.app",
 
-  // Shared secret required by /api/start, so a stranger who finds the
-  // backend's URL can't spin up OAuth consent flows against your
-  // Google Cloud project. This only raises the bar (anyone who
-  // extracts the packaged .ipk can read it back out) — it's not a
-  // substitute for keeping the backend URL itself out of casual reach.
-  PAIRING_SHARED_SECRET: localConfig.PAIRING_SHARED_SECRET || "YOUR_PAIRING_SHARED_SECRET",
+  SUPABASE_URL: localConfig.SUPABASE_URL || "https://YOUR-PROJECT.supabase.co",
+  SUPABASE_ANON_KEY: localConfig.SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY",
+
+  // Local HTTP server serving the actual photo bytes.
+  PHOTO_SERVER_URL: localConfig.PHOTO_SERVER_URL || "http://YOUR-PHOTO-SERVER:PORT",
 
   PAIRING_POLL_INTERVAL_MS: 3 * 1000,
-  PAIRING_POLL_TIMEOUT_MS: 10 * 60 * 1000, // matches the backend's 10-minute KV entry TTL
-
-  PICKER_SESSION_URL: "https://photospicker.googleapis.com/v1/sessions",
-  PICKER_MEDIA_ITEMS_URL: "https://photospicker.googleapis.com/v1/mediaItems",
-
-  // How long to keep polling the Picker session waiting for the user
-  // to finish picking (fallback path only — normally this finishes
-  // during the pairing redirect chain before we even get here).
-  MEDIA_SOURCE_POLL_TIMEOUT_MS: 30 * 60 * 1000,
+  PAIRING_POLL_TIMEOUT_MS: 10 * 60 * 1000, // how long the TV waits for the phone to finish
 
   // Slideshow behavior
-  SLIDE_INTERVAL_MS: 15 * 1000,          // 15 seconds per requirement
-  MEDIA_LIST_REFRESH_MS: 50 * 60 * 1000, // re-fetch baseUrls before the 60 min expiry
-  MAX_ITEMS_TO_LOAD: 200,
+  SLIDE_INTERVAL_MS: 15 * 1000, // 15 seconds per requirement
+  HISTORY_MAX: 50, // how many recently-shown photos Left/Right can browse back through
 
-  // localStorage keys
-  LS_REFRESH_TOKEN: "ambient_photos_refresh_token",
-  LS_PICKER_SESSION_ID: "ambient_photos_picker_session_id",
+  // wa.filetype values considered "an image" — adjust here if the
+  // actual stored values turn out to differ (see README.md note).
+  IMAGE_FILETYPES: ["image", "image/jpeg"],
 };
+
+/* ---------------------- SUPABASE CLIENT ---------------------- */
+
+// supabase-js UMD build (loaded via <script> in index.html) exposes a
+// global `supabase` object with createClient — shadow-renamed here to
+// `supabaseLib` so it doesn't collide with our own `supabaseClient`.
+// eslint-disable-next-line no-undef
+const supabaseLib = window.supabase;
+
+const supabaseClient = supabaseLib.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
+  auth: {
+    persistSession: true, // supabase-js manages its own localStorage keys
+    autoRefreshToken: true,
+    detectSessionInUrl: false, // no OAuth redirect ever lands on the TV itself
+  },
+});
 
 /* ---------------------- DOM ---------------------- */
 
@@ -94,18 +94,14 @@ const el = {
   connectUrl: document.getElementById("connect-url"),
   connectStatus: document.getElementById("connect-status"),
 
-  mediaFallback: document.getElementById("pairing-step-media-fallback"),
-  mediaQr: document.getElementById("media-qr"),
-  mediaUrl: document.getElementById("media-url"),
-
   pairingError: document.getElementById("pairing-error"),
 
   layerA: document.getElementById("layer-a"),
   layerB: document.getElementById("layer-b"),
   overlayDate: document.getElementById("overlay-date"),
+  overlayLocation: document.getElementById("overlay-location"),
 
   menuOverlay: document.getElementById("menu-overlay"),
-  menuRepick: document.getElementById("menu-repick"),
   menuLogout: document.getElementById("menu-logout"),
 
   keepalive: document.getElementById("keepalive"),
@@ -128,23 +124,9 @@ function hideError() {
   el.pairingError.textContent = "";
 }
 
-/* ---------------------- STORAGE ---------------------- */
-
-const store = {
-  get(key) {
-    try { return localStorage.getItem(key); } catch (e) { return null; }
-  },
-  set(key, value) {
-    try { localStorage.setItem(key, value); } catch (e) { /* storage disabled — session-only */ }
-  },
-  remove(key) {
-    try { localStorage.removeItem(key); } catch (e) { /* no-op */ }
-  },
-};
-
 /** RFC 4122 v4 UUID, without relying on crypto.randomUUID (unavailable on
  *  older Chromium builds that some webOS versions ship with). Used here
- *  as the pairing "state" code — treat it like a short-lived credential. */
+ *  as the TV's pairing session id — treat it like a short-lived credential. */
 function uuidv4() {
   const bytes = new Uint8Array(16);
   if (window.crypto && window.crypto.getRandomValues) {
@@ -158,16 +140,12 @@ function uuidv4() {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
 }
 
-/* In-memory access token (never persisted — only the refresh token is) */
-let accessToken = null;
-let accessTokenExpiresAt = 0;
-
 /* ============================================================
- * STEP A — Pairing (via pairing-backend/, not Google directly)
+ * STEP A — Pairing (TV <-> mobile handoff via the web app + KV)
  * ============================================================ */
 
-/** Polls the backend until /api/callback has stashed tokens + session for this code. */
-function pollPairingBackend(pairingCode) {
+/** Polls the web app until /api/auth/tv-poll has tokens waiting for this session id. */
+function pollTvHandoff(tvSessionId) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + CONFIG.PAIRING_POLL_TIMEOUT_MS;
     const poll = async () => {
@@ -176,9 +154,10 @@ function pollPairingBackend(pairingCode) {
         return;
       }
       try {
-        const res = await fetch(`${CONFIG.PAIRING_BACKEND_URL}/api/poll?state=${pairingCode}`);
+        const res = await fetch(`${CONFIG.WEBAPP_URL}/api/auth/tv-poll?sessionId=${tvSessionId}`);
         if (res.status === 200) {
-          resolve(await res.json());
+          const body = await res.json();
+          resolve({ access_token: body.access_token, refresh_token: body.refresh_token });
           return;
         }
         // 202 (pending) or a transient error — keep polling either way.
@@ -191,239 +170,170 @@ function pollPairingBackend(pairingCode) {
   });
 }
 
-/** Runs the full pairing UI + polling sequence and stores the resulting credentials. */
+/** Runs the full pairing UI + polling sequence, hydrates a Supabase
+ *  session from the resulting tokens, and returns that session. */
 async function runPairing() {
   showScreen("pairing");
-  el.mediaFallback.classList.add("hidden");
   el.connectStep.classList.remove("hidden");
+  hideError();
   el.connectStatus.textContent = "Preparing…";
 
-  const pairingCode = uuidv4();
-  const startUrl = `${CONFIG.PAIRING_BACKEND_URL}/api/start?state=${pairingCode}&key=${encodeURIComponent(CONFIG.PAIRING_SHARED_SECRET)}`;
+  const tvSessionId = uuidv4();
+  const loginUrl = `${CONFIG.WEBAPP_URL}/tv-login?session=${tvSessionId}`;
 
-  el.connectUrl.textContent = startUrl.replace(/^https?:\/\//, "").split("&key=")[0];
+  el.connectUrl.textContent = loginUrl.replace(/^https?:\/\//, "");
   el.connectQr.innerHTML = "";
   // eslint-disable-next-line no-undef
-  new QRCode(el.connectQr, { text: startUrl, width: 480, height: 480 });
-  el.connectStatus.textContent = "Waiting for sign-in…";
+  new QRCode(el.connectQr, { text: loginUrl, width: 480, height: 480 });
+  el.connectStatus.textContent = "Waiting for sign-in on your phone…";
 
-  const result = await pollPairingBackend(pairingCode);
-  // result: { refreshToken, accessToken, accessTokenExpiresAt, sessionId }
+  const tokens = await pollTvHandoff(tvSessionId);
 
-  accessToken = result.accessToken;
-  accessTokenExpiresAt = result.accessTokenExpiresAt;
-  store.set(CONFIG.LS_REFRESH_TOKEN, result.refreshToken);
-  store.set(CONFIG.LS_PICKER_SESSION_ID, result.sessionId);
+  const { data, error } = await supabaseClient.auth.setSession({
+    access_token: tokens.access_token,
+    refresh_token: tokens.refresh_token,
+  });
+  if (error) throw error;
 
   el.connectStep.classList.add("hidden");
-  return result.sessionId;
-}
-
-/** Exchanges a stored refresh token for a fresh access token via the backend. */
-async function refreshAccessToken() {
-  const refreshToken = store.get(CONFIG.LS_REFRESH_TOKEN);
-  if (!refreshToken) throw new Error("No refresh token stored.");
-
-  const res = await fetch(`${CONFIG.PAIRING_BACKEND_URL}/api/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refreshToken }),
-  });
-
-  if (!res.ok) {
-    // Refresh token itself is invalid/revoked — force a fresh pairing.
-    store.remove(CONFIG.LS_REFRESH_TOKEN);
-    store.remove(CONFIG.LS_PICKER_SESSION_ID);
-    throw new Error(`Token refresh failed: ${res.status}`);
-  }
-
-  const body = await res.json();
-  accessToken = body.accessToken;
-  accessTokenExpiresAt = Date.now() + body.expiresIn * 1000;
-}
-
-/** Returns a valid access token via the stored refresh token, or null if we need to pair. */
-async function ensureAccessToken() {
-  if (accessToken && Date.now() < accessTokenExpiresAt - 60_000) {
-    return accessToken;
-  }
-  if (!store.get(CONFIG.LS_REFRESH_TOKEN)) {
-    return null;
-  }
-  try {
-    await refreshAccessToken();
-    return accessToken;
-  } catch (e) {
-    return null;
-  }
+  return data.session;
 }
 
 /* ============================================================
- * STEP B — Google Photos Picker API
+ * STEP B — Photo data (wa + hashes tables)
  * ============================================================ */
 
-async function getPickerSession(token, sessionId) {
-  const res = await fetch(`${CONFIG.PICKER_SESSION_URL}/${sessionId}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) throw new Error(`Picker session lookup failed: ${res.status}`);
-  return res.json();
-}
+/**
+ * Picks one random eligible row from `wa` and returns its joined
+ * metadata from `hashes`. PostgREST's query builder has no direct
+ * "order by random()", so this is a count-then-random-offset pair of
+ * requests rather than one round trip. Fine here: each result is only
+ * needed once every SLIDE_INTERVAL_MS, not in a tight loop.
+ */
+async function fetchRandomPhoto() {
+  const { count, error: countError } = await supabaseClient
+    .from("wa")
+    .select("id_hash", { count: "exact", head: true })
+    .not("id_hash", "is", null)
+    .eq("processed", true)
+    .in("filetype", CONFIG.IMAGE_FILETYPES);
 
-/** Polls a picker session until the user finishes selecting media on their phone. */
-function pollPickerSession(token, sessionId, pollIntervalSeconds, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs;
-    const poll = async () => {
-      if (Date.now() > deadline) {
-        reject(new Error("Timed out waiting for a photo selection."));
-        return;
-      }
-      let session;
-      try {
-        session = await getPickerSession(token, sessionId);
-      } catch (err) {
-        setTimeout(poll, pollIntervalSeconds * 1000);
-        return;
-      }
-      if (session.mediaItemsSet) {
-        resolve(session);
-      } else {
-        setTimeout(poll, pollIntervalSeconds * 1000);
-      }
-    };
-    poll();
-  });
+  if (countError) throw countError;
+  if (!count) throw new Error("No eligible photos found in the wa table.");
+
+  const offset = Math.floor(Math.random() * count);
+
+  const { data: waRows, error: waError } = await supabaseClient
+    .from("wa")
+    .select("id_hash")
+    .not("id_hash", "is", null)
+    .eq("processed", true)
+    .in("filetype", CONFIG.IMAGE_FILETYPES)
+    .order("id_hash", { ascending: true }) // deterministic order so the offset is meaningful
+    .range(offset, offset);
+
+  if (waError) throw waError;
+  const idHash = waRows && waRows[0] && waRows[0].id_hash;
+  if (!idHash) throw new Error("Random wa row had no id_hash.");
+
+  const { data: hashRows, error: hashError } = await supabaseClient
+    .from("hashes")
+    .select("filename, location, location_name, timestamp")
+    .eq("id", idHash)
+    .limit(1);
+
+  if (hashError) throw hashError;
+  const meta = hashRows && hashRows[0];
+  if (!meta) throw new Error(`No hashes row found for id_hash ${idHash}.`);
+
+  return meta;
 }
 
 /**
- * Makes sure the given Picker session has media sources selected.
- * Normally the phone was already auto-redirected into the picker by
- * the backend during pairing, so this resolves almost immediately.
- * If not (e.g. re-showing after a restart with an unfinished session),
- * shows a fallback QR/link to the session's own pickerUri.
+ * hashes.location_name looks like:
+ *   "Holon\nEstimated location - \nLearn more"
+ * The actual place name is the first line; the rest is Google Photos'
+ * own UI boilerplate, not meaningful metadata.
  */
-async function ensureSessionReady(token, sessionId) {
-  showScreen("pairing");
-  el.connectStep.classList.add("hidden");
-
-  let session = await getPickerSession(token, sessionId);
-  if (session.mediaItemsSet) return;
-
-  el.mediaFallback.classList.remove("hidden");
-  el.mediaUrl.textContent = session.pickerUri.replace(/^https?:\/\//, "");
-  el.mediaQr.innerHTML = "";
-  // eslint-disable-next-line no-undef
-  new QRCode(el.mediaQr, { text: session.pickerUri, width: 480, height: 480 });
-
-  const pollInterval = session.pollingConfig?.pollInterval
-    ? parseFloat(session.pollingConfig.pollInterval)
-    : 3;
-
-  await pollPickerSession(token, sessionId, pollInterval, CONFIG.MEDIA_SOURCE_POLL_TIMEOUT_MS);
-  el.mediaFallback.classList.add("hidden");
+function parseLocationName(raw) {
+  if (!raw) return "";
+  const lines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines[0] || "";
 }
 
-/** Fetches every picked media item for a completed session (paginated). */
-async function listPickedMediaItems(token, sessionId) {
-  const items = [];
-  let pageToken = "";
+/** hashes.location looks like "https://www.google.com/maps?q=loc:LAT,LNG". */
+function parseMapsCoords(raw) {
+  if (!raw) return null;
+  const match = raw.match(/loc:(-?\d+\.?\d*),(-?\d+\.?\d*)/);
+  if (!match) return null;
+  return { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
+}
 
-  do {
-    const url = new URL(CONFIG.PICKER_MEDIA_ITEMS_URL);
-    url.searchParams.set("sessionId", sessionId);
-    url.searchParams.set("pageSize", "100");
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
+/** Prefers the human place name; falls back to raw coordinates; empty
+ *  string (not shown) if neither field has anything usable. */
+function formatLocation(meta) {
+  const name = parseLocationName(meta.location_name);
+  if (name) return name;
+  const coords = parseMapsCoords(meta.location);
+  if (coords) return `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`;
+  return "";
+}
 
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error(`mediaItems.list failed: ${res.status}`);
-    const body = await res.json();
+function formatTimestamp(meta) {
+  if (!meta.timestamp) return "";
+  const d = new Date(meta.timestamp);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
 
-    (body.mediaItems || []).forEach((item) => items.push(item));
-    pageToken = body.nextPageToken || "";
-  } while (pageToken && items.length < CONFIG.MAX_ITEMS_TO_LOAD);
-
-  // Photos only — skip videos for a still-image ambient slideshow.
-  return items.filter((item) => item.mediaFile?.mimeType?.startsWith("image/"));
+function photoImageUrl(meta) {
+  return `${CONFIG.PHOTO_SERVER_URL}/${encodeURIComponent(meta.filename)}`;
 }
 
 /* ============================================================
  * STEP C — Slideshow engine
  * ============================================================ */
 
-let mediaItems = [];
-let displayedIndex = -1; // index of the currently-visible item; -1 = nothing shown yet
 let visibleLayer = el.layerA;
 let hiddenLayer = el.layerB;
 let slideTimer = null;
 
-/** Google Photos base URLs need a size suffix and expire after ~60 min. */
-function fullResUrl(item) {
-  return `${item.mediaFile.baseUrl}=w1920-h1080`;
-}
+// Each photo is fetched fresh rather than drawn from a pre-loaded
+// playlist, so a small rolling buffer is what makes manual "previous"
+// possible — otherwise there'd be nothing to go back to.
+let history = [];
+let historyIndex = -1; // pointer into history; -1 = nothing shown yet
 
-function formatDate(item) {
-  const iso = item.mediaFile?.mediaFileMetadata?.creationTime || item.createTime;
-  if (!iso) return "";
-  const d = new Date(iso);
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
-}
-
-/**
- * Google Photos base URLs (Library API and Picker API alike) are not
- * plain public image URLs — Google requires the request to carry the
- * same OAuth access token as an `Authorization: Bearer` header, or it
- * 403s. A bare <img src="..."> can't attach that header, so we fetch
- * the bytes ourselves and hand the <img> a local blob: URL instead.
- */
-function preload(item) {
+/** Local HTTP server is assumed unauthenticated on the home LAN, so a
+ *  plain <img> load (no Bearer-token blob workaround like the old
+ *  Google Photos code needed) is enough. */
+function preloadImage(url) {
   return new Promise((resolve, reject) => {
-    (async () => {
-      try {
-        const token = await ensureAccessToken();
-        if (!token) throw new Error("No access token available for image fetch.");
-
-        const res = await fetch(fullResUrl(item), {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error(`Image fetch failed: ${res.status}`);
-
-        const blob = await res.blob();
-        const objectUrl = URL.createObjectURL(blob);
-
-        const img = new Image();
-        img.onload = () => resolve(objectUrl);
-        img.onerror = () => {
-          URL.revokeObjectURL(objectUrl);
-          reject(new Error("Image failed to decode."));
-        };
-        img.src = objectUrl;
-      } catch (e) {
-        reject(e);
-      }
-    })();
+    const img = new Image();
+    img.onload = () => resolve(url);
+    img.onerror = () => reject(new Error(`Image failed to load: ${url}`));
+    img.src = url;
   });
 }
 
-/** Loads and crossfades in a specific item. Returns false (without
- *  throwing) if the item's image failed to load/decode, so callers can
- *  skip to the next one in whichever direction they're going. */
-async function renderItem(item) {
-  let url;
+/** Loads and crossfades in a specific photo's metadata. Returns false
+ *  (without throwing) if the image failed to load, so callers can
+ *  move on rather than getting stuck on one broken row. */
+async function renderPhoto(meta) {
+  const url = photoImageUrl(meta);
   try {
-    url = await preload(item);
+    await preloadImage(url);
   } catch (e) {
+    console.error(e);
     return false;
   }
 
-  // hiddenLayer is about to be overwritten and has been off-screen since
-  // the previous-previous cycle, so its old blob: URL is safe to free.
-  if (hiddenLayer.dataset.objectUrl) {
-    URL.revokeObjectURL(hiddenLayer.dataset.objectUrl);
-  }
   hiddenLayer.src = url;
-  hiddenLayer.dataset.objectUrl = url;
-  el.overlayDate.textContent = formatDate(item);
+  el.overlayDate.textContent = formatTimestamp(meta);
+  el.overlayLocation.textContent = formatLocation(meta);
 
   // Crossfade: fade the new layer in, fade the old one out, then swap roles.
   hiddenLayer.classList.add("visible");
@@ -432,18 +342,38 @@ async function renderItem(item) {
   return true;
 }
 
+async function fetchAndPushRandomPhoto() {
+  const meta = await fetchRandomPhoto();
+  history.push(meta);
+  if (history.length > CONFIG.HISTORY_MAX) history.shift();
+  historyIndex = history.length - 1;
+  return meta;
+}
+
 async function showNextSlide() {
-  if (mediaItems.length === 0) return;
-  displayedIndex = (displayedIndex + 1) % mediaItems.length;
-  const ok = await renderItem(mediaItems[displayedIndex]);
-  if (!ok) showNextSlide(); // skip a broken/expired item, try the next one immediately
+  let meta;
+  if (historyIndex < history.length - 1) {
+    // Stepped backward manually earlier — walk forward through the
+    // buffered history before fetching anything new.
+    historyIndex++;
+    meta = history[historyIndex];
+  } else {
+    try {
+      meta = await fetchAndPushRandomPhoto();
+    } catch (err) {
+      console.error("Failed to fetch next photo:", err);
+      return; // next timer tick retries
+    }
+  }
+  const ok = await renderPhoto(meta);
+  if (!ok) showNextSlide(); // skip a broken row, try another immediately
 }
 
 async function showPrevSlide() {
-  if (mediaItems.length === 0) return;
-  displayedIndex = (displayedIndex - 1 + mediaItems.length) % mediaItems.length;
-  const ok = await renderItem(mediaItems[displayedIndex]);
-  if (!ok) showPrevSlide(); // skip a broken/expired item, try the previous one immediately
+  if (historyIndex <= 0) return; // nothing earlier buffered yet
+  historyIndex--;
+  const ok = await renderPhoto(history[historyIndex]);
+  if (!ok) showPrevSlide();
 }
 
 function restartSlideTimer() {
@@ -469,104 +399,27 @@ function startSlideshow() {
   restartSlideTimer();
 }
 
-/** Re-fetches the media list (fresh baseUrls) without interrupting playback. */
-let mediaListRefreshTimer = null;
-function scheduleMediaListRefresh(sessionId) {
-  clearInterval(mediaListRefreshTimer); // repick/relogin can call this again — don't stack timers
-  mediaListRefreshTimer = setInterval(async () => {
-    try {
-      const token = await ensureAccessToken();
-      if (!token) return; // next tick retries; boot() only re-pairs on startup
-      const fresh = await listPickedMediaItems(token, sessionId);
-      if (fresh.length) mediaItems = fresh;
-    } catch (err) {
-      // Keep showing the current (possibly stale) list; next tick retries.
-      console.error("Media list refresh failed:", err);
-    }
-  }, CONFIG.MEDIA_LIST_REFRESH_MS);
-}
-
 /* ============================================================
- * STEP D — Remote-control menu (repick / log out)
+ * STEP D — Remote-control menu (log out)
  * ============================================================ */
 
-/** Creates a brand-new Picker session for the already-authorized
- *  account — no Google sign-in required, unlike full pairing. Called
- *  directly against Google (same as getPickerSession/listPickedMediaItems
- *  already do); this JSON endpoint accepts cross-origin Bearer-token
- *  requests same as those do. */
-async function createPickerSession(token) {
-  const res = await fetch(CONFIG.PICKER_SESSION_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: "{}",
-  });
-  if (!res.ok) throw new Error(`Picker session creation failed: ${res.status}`);
-  return res.json();
-}
-
-/** "Repick Photos": keeps the current Google sign-in, just opens a new
- *  Picker session so a different album/selection can be chosen. Shows
- *  only the photo-picker QR (pairing-step-media-fallback), not the
- *  full sign-in QR. */
-async function repickPhotos() {
-  clearInterval(slideTimer);
-  clearInterval(mediaListRefreshTimer);
-  hideError();
-
-  try {
-    const token = await ensureAccessToken();
-    if (!token) {
-      // Refresh token itself is gone/invalid — nothing to repick with.
-      await logOut();
-      return;
-    }
-
-    const session = await createPickerSession(token);
-    store.set(CONFIG.LS_PICKER_SESSION_ID, session.id);
-
-    showScreen("pairing");
-    el.connectStep.classList.add("hidden"); // skip the sign-in QR — already signed in
-    await ensureSessionReady(token, session.id);
-
-    mediaItems = await listPickedMediaItems(token, session.id);
-    if (mediaItems.length === 0) {
-      throw new Error("No photos were selected.");
-    }
-
-    scheduleMediaListRefresh(session.id);
-    startSlideshow();
-  } catch (err) {
-    console.error(err);
-    showScreen("pairing");
-    el.connectStep.classList.add("hidden");
-    showError(err.message || "Repicking photos failed.");
-  }
-}
-
-/** "Log Out": clears everything (refresh token + Picker session) and
- *  drops back to the full sign-in QR, same as a fresh first run. */
+/** "Log Out": clears the Supabase session and drops back to the
+ *  sign-in QR, same as a fresh first run. There's no "Repick Photos"
+ *  equivalent anymore — photos come from the wa/hashes tables rather
+ *  than a per-session picker selection, so there's nothing to repick.
+ *  (Right-arrow already works as an ad hoc "skip this one" during
+ *  manual browsing — flag if a dedicated "shuffle" button is wanted
+ *  instead.) */
 async function logOut() {
   clearInterval(slideTimer);
-  clearInterval(mediaListRefreshTimer);
+  history = [];
+  historyIndex = -1;
 
-  store.remove(CONFIG.LS_REFRESH_TOKEN);
-  store.remove(CONFIG.LS_PICKER_SESSION_ID);
-  accessToken = null;
-  accessTokenExpiresAt = 0;
-  mediaItems = [];
+  await supabaseClient.auth.signOut();
 
-  el.connectStep.classList.remove("hidden");
   hideError();
   boot();
 }
-
-/* ---- Remote-control wiring: any button reveals the menu, D-pad moves
- *      focus between the two buttons, OK activates natively, Back/Escape
- *      dismisses, and it auto-hides after a few seconds either way. ---- */
 
 let menuHideTimer = null;
 const MENU_AUTO_HIDE_MS = 8000;
@@ -578,7 +431,7 @@ function menuIsOpen() {
 function showMenu() {
   clearTimeout(menuHideTimer);
   el.menuOverlay.classList.remove("hidden");
-  el.menuRepick.focus();
+  el.menuLogout.focus();
   menuHideTimer = setTimeout(hideMenu, MENU_AUTO_HIDE_MS);
 }
 
@@ -607,15 +460,11 @@ document.addEventListener("keydown", (e) => {
     clearTimeout(menuHideTimer);
     menuHideTimer = setTimeout(hideMenu, MENU_AUTO_HIDE_MS);
 
-    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) {
-      const next = document.activeElement === el.menuRepick ? el.menuLogout : el.menuRepick;
-      next.focus();
-      e.preventDefault();
-    } else if (isBackKey(e)) {
+    if (isBackKey(e)) {
       hideMenu();
       e.preventDefault();
     }
-    // Enter/OK activates whichever button is focused via native <button> behavior.
+    // Enter/OK activates the (only) button natively.
     return;
   }
 
@@ -633,11 +482,6 @@ document.addEventListener("keydown", (e) => {
     showMenu();
     e.preventDefault();
   }
-});
-
-el.menuRepick.addEventListener("click", () => {
-  hideMenu();
-  repickPhotos();
 });
 
 el.menuLogout.addEventListener("click", () => {
@@ -734,32 +578,17 @@ function suppressScreenSaverViaLuna() {
 async function boot() {
   showScreen("boot");
   try {
-    let token = await ensureAccessToken();
-    let sessionId = store.get(CONFIG.LS_PICKER_SESSION_ID);
+    const { data } = await supabaseClient.auth.getSession();
+    let session = data.session;
 
-    if (!token || !sessionId) {
-      sessionId = await runPairing();
-      token = accessToken;
+    if (!session) {
+      session = await runPairing();
     }
 
-    try {
-      await ensureSessionReady(token, sessionId);
-    } catch (e) {
-      // Session was deleted/expired server-side, or belongs to a stale
-      // pairing — clear it and pair again from scratch.
-      store.remove(CONFIG.LS_REFRESH_TOKEN);
-      store.remove(CONFIG.LS_PICKER_SESSION_ID);
-      sessionId = await runPairing();
-      token = accessToken;
-      await ensureSessionReady(token, sessionId);
+    if (!session) {
+      throw new Error("Sign-in did not produce a usable session.");
     }
 
-    mediaItems = await listPickedMediaItems(token, sessionId);
-    if (mediaItems.length === 0) {
-      throw new Error("No photos were found in the picker selection.");
-    }
-
-    scheduleMediaListRefresh(sessionId);
     startSlideshow();
   } catch (err) {
     console.error(err);
