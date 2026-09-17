@@ -1,30 +1,29 @@
 # Ambient Photos — webOS TV slideshow
 
-## ⚠️ Read this first: two other approaches were tried and rejected
+## Architecture
 
-Your original spec called for `mediaItems:search` filtered by album or
-favorite status. As of **April 1, 2025**, Google removed that capability
-for the `photoslibrary.readonly` scope — the Library API now only returns
-items an app *itself* uploaded.
+This app shows an ambient, ever-changing slideshow on an LG webOS TV,
+pulling from a personal photo database rather than a live album on a
+photo-sharing service. Three pieces:
 
-The next candidate, the **Photos Ambient API**, is purpose-built for
-exactly this use case (a persistent "device" with an ongoing curated
-feed, no re-picking) — but it requires acceptance into Google's **Photos
-Partner Program** first. That's a formal application aimed at device
-manufacturers, not a self-serve API, so it's a dead end for a personal
-project unless you want to go apply for it separately.
+- **`src/`** — the webOS TV app itself: plain HTML/CSS/JS, no build
+  step. Shows a QR code for pairing, then a 15-second-crossfade
+  slideshow with a timestamp + location overlay.
+- **`webapp/`** — a small Next.js app (separate Vercel deployment) that
+  handles the TV-to-mobile auth handoff: two API routes backed by
+  Vercel KV, plus the mobile landing page the QR code points at.
+- **Supabase** — auth (GitHub SSO, restricted to one allowed email)
+  and the photo database itself (`wa` + `hashes` tables, fed by a
+  separate ingest project — not part of this repo).
 
-What this app actually uses is the **Photos Picker API**, which needs no
-partner approval. Its catch: the scope
-(`photospicker.mediaitems.readonly`) isn't on Google's allow-list for the
-OAuth **Device Authorization Grant** (the TV-shows-a-code flow) —
-requesting it there returns `invalid_scope`. Getting that scope requires
-a standard **Authorization Code** flow with a real HTTPS redirect URI,
-which a TV app alone can't provide. So this app talks to a small
-**pairing backend** (in `pairing-backend/`) instead of Google directly
-for anything auth-related — see that folder's own README for what it
-does and how to deploy it. The end-user experience is unchanged: one QR
-code on the TV, sign in and pick photos on your phone.
+Photo bytes themselves come from a plain HTTP server on a machine in
+your home LAN, not from Supabase Storage or any cloud photo service.
+
+> **Coming from an older checkout?** This app used to run on the
+> Google Photos Picker API via a `pairing-backend/` OAuth bridge.
+> That's retired — see `CLAUDE.md`'s "History: the Google Photos era"
+> section if you're curious why it existed. `pairing-backend/` can be
+> deleted once you've confirmed the new flow below works end to end.
 
 ## Directory layout
 
@@ -36,28 +35,79 @@ webos-photos-slideshow/
 │   ├── icon.png                 ← 80x80 app icon (placeholder — swap for your own)
 │   ├── index.html                ← markup for pairing screen + slideshow
 │   ├── style.css                  ← dark-mode lean-back styling, crossfade CSS
-│   ├── app.js                      ← pairing-backend client, Picker API flow, slideshow engine
+│   ├── app.js                      ← Supabase/KV pairing client, wa/hashes fetching, slideshow engine
 │   └── secrets.local.js.example     ← copy to secrets.local.js (gitignored) for local testing
 ├── .github/workflows/          ← GitHub Action: package + deploy to the TV over Tailscale
-└── pairing-backend/             ← small Vercel service — a SEPARATE deployment, never packaged
+├── webapp/                      ← Next.js app — a SEPARATE Vercel deployment, never packaged into the TV app
+│   ├── app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + email
+│   ├── app/api/auth/tv-poll/route.js       TV polls this for the tokens
+│   ├── app/tv-login/page.js                 mobile landing page, drives Supabase GitHub sign-in
+│   └── lib/                                  cors.js, uuid.js, supabaseClient.js
+└── pairing-backend/              ← RETIRED (Google Photos era) — safe to delete once confirmed unused
 ```
 
 Everything under `src/` is plain HTML/CSS/JS — no build step, no
 bundler — and is exactly the directory you hand to `ares-package`
-(`ares-package src`). Keeping the TV app in its own `src/` folder means
-packaging never needs to explicitly exclude `pairing-backend/`,
-`.github/`, or this README — they're simply siblings, not descendants.
+(`ares-package src`). `webapp/` is a normal Next.js app; deploy it to
+Vercel like any other.
 
-## 0. Deploy the pairing backend
+## 0. Set up Supabase
 
-Do this first — the TV app needs its URL. Full instructions are in
-[`pairing-backend/README.md`](pairing-backend/README.md): create a
-**Web application** OAuth client (not "TVs and Limited Input devices"),
-enable the Photos Picker API, deploy the four functions to Vercel with a
-KV database attached, generate a `PAIRING_SHARED_SECRET`, and note the
-resulting `https://....vercel.app` URL.
+1. Create (or reuse) a Supabase project with GitHub added as an Auth
+   provider, and the `wa`/`hashes` tables already populated by your
+   ingest project.
+2. **Row Level Security** — the TV queries these tables using the
+   signed-in user's own token, not a service role key, so RLS needs an
+   explicit policy or every query will silently return zero rows:
+   ```sql
+   alter table wa enable row level security;
+   alter table hashes enable row level security;
 
-## 1. Configure the app
+   create policy "allowed account can read wa"
+     on wa for select
+     to authenticated
+     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+
+   create policy "allowed account can read hashes"
+     on hashes for select
+     to authenticated
+     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+   ```
+3. Note your project's **URL** and **anon/public key** (Settings →
+   API) — needed by both `webapp/` and the TV app below. The anon key
+   is meant to be public/client-side; RLS above is the real access
+   control.
+4. **Auth → URL Configuration → Redirect URLs** — add
+   `https://<your-webapp>.vercel.app/tv-login` (and
+   `http://localhost:3000/tv-login` for local testing), or the mobile
+   sign-in page's OAuth redirect will be rejected.
+
+## 1. Deploy the web app (`webapp/`)
+
+Do this before configuring the TV app — the TV needs its URL.
+
+```bash
+cd webapp
+npm install
+```
+
+Attach a **Vercel KV** (Upstash Redis) database to the Vercel project
+— this auto-populates `KV_REST_API_URL`/`KV_REST_API_TOKEN`. Then set
+these Vercel environment variables:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `ALLOWED_EMAIL` (defaults to `cohen.n@gmail.com` if unset)
+
+Deploy (`vercel deploy` or connect the repo/subdirectory in the Vercel
+dashboard) and note the resulting `https://....vercel.app` URL.
+
+To test locally first: `npm run dev`, with a `.env.local` copied from
+`webapp/.env.example`. See `webapp/STEP1-NOTES.md` and
+`webapp/STEP2-NOTES.md` for manual `curl` walkthroughs of the
+handoff/poll endpoints and the sign-in page.
+
+## 2. Configure the TV app
 
 **If you're deploying via the GitHub Action (section 5 below), skip
 this** — leave the placeholders in `src/app.js` as-is; the workflow
@@ -72,28 +122,26 @@ and fill in:
 
 ```js
 window.APP_CONFIG = {
-  PAIRING_BACKEND_URL: "https://your-pairing-backend.vercel.app",
-  PAIRING_SHARED_SECRET: "the same value you set on the backend",
+  WEBAPP_URL: "https://your-webapp.vercel.app",
+  SUPABASE_URL: "https://your-project.supabase.co",
+  SUPABASE_ANON_KEY: "your-anon-key",
+  PHOTO_SERVER_URL: "http://192.168.1.50:8080",
 };
 ```
 
 `src/app.js` reads this at runtime — `window.APP_CONFIG` if present,
 otherwise its own placeholder strings (which is what the GitHub Action
-replaces for real builds). Either way, nothing sensitive needs to be
-edited into `app.js` directly or committed to the repo.
+replaces for real builds).
 
 Also update `src/appinfo.json` → `"id"` to your own reverse-domain app
 ID (e.g. `com.yourname.ambientphotos`) if packaging manually — the
 GitHub Action sets this (and `vendor`) for you.
 
-There is no Google client ID/secret anywhere in the TV app — those live
-only in the pairing backend's own environment variables.
-
 ## Testing locally in Chrome
 
-Since it's plain static HTML/JS/CSS, you can preview the whole pairing
-+ slideshow flow in a desktop browser before ever touching the TV or
-`ares-package`. From inside `src/`:
+Since the TV app is plain static HTML/JS/CSS, you can preview the
+whole pairing + slideshow flow in a desktop browser before ever
+touching the TV or `ares-package`. From inside `src/`:
 
 ```bash
 cd src
@@ -103,12 +151,18 @@ npx serve .
 Open the printed `http://localhost:...` URL in Chrome. Don't open
 `index.html` directly via `file://` — `fetch()` calls and the QR code
 renderer get blocked by browser security restrictions on that origin.
-Since webOS's browser is also Chromium-based under the hood, this is a
-genuinely useful proxy for what'll happen on the real TV, not just a
-rough approximation — DevTools' Console/Network tabs during the flow
-are the easiest way to catch problems early.
+(This `file://` restriction is specific to desktop Chrome — it doesn't
+apply on the real webOS TV, which is relevant if you're ever
+integrating this as a system screensaver via a `file://`-loading
+`WebEngineView` rather than through this local dev server.)
 
-## 2. Install the webOS CLI (on your dev machine, not the TV)
+Since webOS's browser is also Chromium-based under the hood, this is a
+genuinely useful proxy for what'll happen on the real TV — DevTools'
+Console/Network tabs during the flow are the easiest way to catch
+problems early. Run `webapp` locally too (`npm run dev` in that
+directory) if you want the full loop without touching production.
+
+## 3. Install the webOS CLI (on your dev machine, not the TV)
 
 ```bash
 npm install -g @webos-tools/cli
@@ -129,7 +183,7 @@ ares-setup-device
 # port 9922, and the passphrase shown in the Developer Mode app
 ```
 
-## 3. Package and install
+## 4. Package and install
 
 ```bash
 ares-package src --no-minify
@@ -151,17 +205,18 @@ To iterate quickly during development, `ares-install` again after each
 ### First run on the TV
 
 1. The app shows one QR code / link. Scan it (or open the link) on your
-   phone — it takes you through Google sign-in and then straight into
-   the Photos Picker to choose albums/photos, back to back.
-2. The slideshow starts automatically once you finish picking, and keeps
-   running; the picked-item list is silently refreshed every 50 minutes
-   to keep image URLs (which expire hourly) valid. The refresh token and
-   Picker session id are stored in `localStorage`, so a reboot skips
-   pairing entirely — until that session eventually needs re-picking
-   (Picker sessions aren't indefinite), at which point the same QR flow
-   reappears automatically.
+   phone — it takes you to the web app's sign-in page, where you sign
+   in with the one allowed GitHub account.
+2. The slideshow starts automatically once sign-in completes.
+   Supabase's client library keeps the session valid on its own
+   (automatic token refresh), so a reboot skips pairing entirely —
+   until you explicitly Log Out from the on-screen remote menu, at
+   which point the same QR flow reappears.
+3. Each photo is fetched fresh from the `wa`/`hashes` tables — there's
+   no fixed "picked album" to run out of or need to refresh
+   periodically, unlike the old Google Photos Picker flow.
 
-## 4. Generating the TV pairing key
+## 5. Generating the TV pairing key
 
 Generate this once, locally, from a machine already on the same LAN as
 the TV (with Developer Mode open and its passphrase visible on-screen):
@@ -201,7 +256,7 @@ the Developer Mode app on the TV; the derived key stops working once the
 session lapses and you'll need to regenerate it via the commands above
 with a fresh passphrase.
 
-## 5. Automatic deploys via GitHub Actions (`.github/workflows/deploy-webos.yml`)
+## 6. Automatic deploys via GitHub Actions (`.github/workflows/deploy-webos.yml`)
 
 The workflow packages the app, joins your tailnet, and pushes the result
 straight to the TV on every push to `main` that touches a file under
@@ -245,7 +300,7 @@ these repo secrets:
 
 ### b) TV pairing key
 
-- `WEBOS_TV_SSH_KEY_B64` — from section 4 above
+- `WEBOS_TV_SSH_KEY_B64` — from section 5 above
 - `WEBOS_TV_HOST` — the TV's LAN IP (reachable via the subnet route)
 - `TV_PASSPHRASE` — the Developer Mode passphrase shown on-screen at the
   time you registered the device; used by `ares-setup-device` in the
@@ -258,19 +313,23 @@ these repo secrets:
 workflow drops in your GitHub username/org (`github.repository_owner`)
 automatically.
 
-### c) Pairing backend
+### c) Web app / Supabase config
 
-Two repo secrets — the workflow writes both into `src/app.js` in place
-of the `CONFIG.PAIRING_BACKEND_URL` / `CONFIG.PAIRING_SHARED_SECRET`
-placeholders right before packaging:
-- `PAIRING_BACKEND_URL` — e.g. `https://your-pairing-backend.vercel.app`
-  (no trailing slash), from step 0
-- `PAIRING_SHARED_SECRET` — the same value you set as the backend's
-  `PAIRING_SHARED_SECRET` env var
+Four repo secrets — the workflow writes all of them into `src/app.js`
+in place of the `CONFIG.WEBAPP_URL` / `CONFIG.SUPABASE_URL` /
+`CONFIG.SUPABASE_ANON_KEY` / `CONFIG.PHOTO_SERVER_URL` placeholders
+right before packaging:
 
-There's no Google client ID/secret to add here — those belong to the
-pairing backend's *own* Vercel project env vars, set up separately per
-`pairing-backend/README.md`, and this GitHub Action never touches them.
+- `WEBAPP_URL` — e.g. `https://your-webapp.vercel.app` (no trailing
+  slash), from step 1
+- `SUPABASE_URL` — from step 0
+- `SUPABASE_ANON_KEY` — from step 0 (the anon/public key, not the
+  service role key)
+- `PHOTO_SERVER_URL` — e.g. `http://192.168.1.50:8080`
+
+If you're migrating an existing deployment, **remove** the old
+`PAIRING_BACKEND_URL` / `PAIRING_SHARED_SECRET` repo secrets — nothing
+references them anymore.
 
 ### Changes made to the default workflow, for future reference
 
@@ -296,7 +355,7 @@ diverged from a "textbook" version in a few deliberate ways:
   diagnostic output in the log, useful when a deploy fails at the
   install step and you need to confirm the device profile actually
   registered correctly.
-- **`--no-minify`** on `ares-package` (see section 3 above).
+- **`--no-minify`** on `ares-package` (see section 4 above).
 - **The relaunch step is commented out** — `ares-install` already
   restarts a running app on install for this project's testing
   workflow; uncomment `ares-launch` if your TV doesn't do this
@@ -310,12 +369,19 @@ diverged from a "textbook" version in a few deliberate ways:
 
 - **15-second crossfade timing** lives in `CONFIG.SLIDE_INTERVAL_MS` and
   the CSS `--transition-duration` variable in `style.css`.
-- **Image count cap** (`CONFIG.MAX_ITEMS_TO_LOAD`) guards against loading
-  an enormous picked album into memory at once; raise it if you picked a
-  large album and want the full set in rotation.
-- **Pairing timeout**: `CONFIG.PAIRING_POLL_TIMEOUT_MS` (10 minutes)
-  matches the pairing backend's KV entry TTL — if you change one, change
-  the other (`ex: 600` in `pairing-backend/api/callback.js`).
+- **History buffer size** (`CONFIG.HISTORY_MAX`, currently 50) controls
+  how far back manual Left-arrow "previous" navigation can go before
+  hitting the start of what's been shown this session.
+- **Pairing timeout**: `CONFIG.PAIRING_POLL_TIMEOUT_MS` (10 minutes) —
+  how long the TV waits overall for the phone to finish sign-in. This
+  is separate from the KV handoff record's own 5-minute TTL (in
+  `webapp/app/api/auth/tv-handoff/route.js`), which only needs to
+  cover the gap between the phone finishing sign-in and the TV's next
+  poll — normally seconds.
+- **`wa.filetype` values**: `CONFIG.IMAGE_FILETYPES` currently filters
+  on `["image", "image/jpeg"]` per spec; run
+  `select distinct filetype from wa` against your actual data and
+  adjust if it stores something else.
 - webOS's browser engine is Chromium-based and modern enough for all the
   `fetch`/`async`/`URLSearchParams` used here, but if you're targeting a
   very old webOS 4 firmware revision, test on the actual TV early —

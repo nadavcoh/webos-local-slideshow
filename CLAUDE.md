@@ -7,111 +7,106 @@ summarizes *why* things are built the way they are — the README covers
 
 ## What this is
 
-An ambient Google Photos slideshow for an LG webOS 4K TV. Dark 16:9
-"lean-back" UI, 15s crossfades, timestamp overlay. Deployed via a
-GitHub Action that packages the app and pushes it to the TV over
-Tailscale.
+An ambient photo slideshow for an LG webOS 4K TV, pulling from a
+personal photo database rather than a live Google Photos album. Dark
+16:9 "lean-back" UI, 15s crossfades, timestamp + location overlay.
+Deployed via a GitHub Action that packages the app and pushes it to
+the TV over Tailscale.
 
-## Architecture, and why it isn't the obvious thing
+## Architecture, and why it isn't the Google Photos thing anymore
 
-This went through three different Google Photos API approaches before
-landing on the current one. If you're tempted to "simplify" the auth
-flow, re-read this section first — each rejected approach was rejected
-for a concrete, verified reason, not a hunch:
+This project originally ran on the Google Photos Picker API via a
+`pairing-backend/` OAuth bridge — see "History: the Google Photos
+era" below for why that existed and why it was retired. As of the
+current architecture:
 
-1. **Library API `mediaItems:search`** (the original ask) — Google
-   removed general library search from this endpoint on April 1, 2025.
-   `photoslibrary.readonly` now only returns items the app itself
-   uploaded. Dead end.
-2. **Photos Ambient API** — purpose-built for exactly this use case (a
-   persistent "device" + an ongoing curated feed, no re-picking
-   sessions). Architecturally the best fit. But it's gated behind
-   Google's **Photos Partner Program**, a formal application aimed at
-   device manufacturers — not self-serve, no guaranteed approval or
-   timeline. Confirmed via a real 403
-   `PERMISSION_DENIED`/`developers.google.com/photos/partner-program`
-   response, not just docs. Dead end for a personal project.
-3. **Photos Picker API** (current) — no partner approval needed. But
-   its scope (`photospicker.mediaitems.readonly`) is not on Google's
-   allow-list for the OAuth **Device Authorization Grant** (the
-   TV-shows-a-code flow) — confirmed via a real `invalid_scope`
-   response. Getting that scope requires a standard **Authorization
-   Code** flow with a real HTTPS redirect URI, which a TV app alone
-   can't provide.
+- **Auth**: Supabase (GitHub SSO), restricted to a single allowed
+  email (`cohen.n@gmail.com`, same allowlist pattern as
+  `photo-match-next`).
+- **Photo data**: a `wa` table (photo metadata, one row per photo)
+  joined against a `hashes` table (`wa.id_hash -> hashes.id`) for
+  filename, location, location_name, and timestamp. Same underlying
+  database/schema as the `photo-match-next` project — both are fed by
+  a separate `phash` ingest repo, not by anything in this repo.
+- **Photo bytes**: a plain, unauthenticated HTTP server on a machine
+  in the home LAN, serving files by filename. Not Supabase Storage,
+  not Backblaze — just a local static file server.
+- **TV-to-mobile auth handoff**: a small Next.js web app (separate
+  deployment, in `webapp/` if pulled into this repo — see "Repo
+  layout") with two API routes backed by Vercel KV:
+  - `POST /api/auth/tv-handoff` — phone calls this after Supabase
+    GitHub sign-in, sending `tvSessionId` + both tokens. Server
+    re-verifies the access token against Supabase itself and checks
+    the email server-side before writing to KV (5 min TTL) — the
+    client's claimed identity is never trusted directly.
+  - `GET /api/auth/tv-poll?sessionId=...` — TV polls this every ~3s;
+    returns the tokens once available and deletes the KV record in
+    the same request (not truly atomic — `@vercel/kv` has no
+    `GETDEL` — but fine here since only the originating TV will ever
+    poll a given session id).
+  - `/tv-login` — the mobile landing page the QR code points at;
+    drives the Supabase GitHub OAuth (implicit flow, tokens land in
+    the URL hash) and calls `tv-handoff` once signed in.
 
-That last constraint is why there's a whole separate `pairing-backend/`
-service: it's a small Vercel deployment that does the real OAuth
-Authorization Code exchange server-side (so the TV app never needs a
-client secret at all — an improvement over the original device-flow
-design, which Google's own docs flag as inherently unable to keep a
-secret confidential on a TV anyway), then bridges the result back to
-the TV via short-lived pairing codes it polls for. End-user experience
-is still just "one QR code on the TV, sign in and pick photos on your
-phone."
+This is **not** a real OAuth Device Flow (RFC 8628) — no device code
+is verified against GitHub/Supabase directly, and the TV's UUID is
+just a pickup key for the KV relay. That's an intentional
+simplification for a single-user app; don't describe it as Device
+Flow in user-facing copy.
+
+### Security model change from the Google Photos era
+
+There's no shared secret gating the pairing URL anymore (the old
+`PAIRING_SHARED_SECRET` had no equivalent introduced). A stranger who
+finds this TV's QR/URL only reaches a GitHub sign-in page —
+`tv-handoff` itself rejects anyone whose GitHub-verified email isn't
+the one allowed address, so gating the URL earlier would add nothing.
+The Supabase anon key embedded in the TV app is meant to be
+public/client-side; RLS policies on `wa`/`hashes` (scoped to the
+allowed email) are the actual access control — **if those policies
+are missing, the TV app will silently get zero rows back, not an
+error.** See README.md for the policy SQL.
 
 ## Repo layout
 
 ```
 src/                    ← the actual webOS app (ares-package src)
-  app.js                  pairing-backend client, Picker API, slideshow
+  app.js                  Supabase/KV pairing client, wa/hashes fetching, slideshow
   index.html, style.css, appinfo.json, icon.png
   secrets.local.js.example  copy → secrets.local.js (gitignored) for local testing
-pairing-backend/        ← separate Vercel deployment, NOT packaged into the TV app
-  api/start.js            gated by PAIRING_SHARED_SECRET; HMAC-signs `state`
-  api/callback.js         verifies signature, exchanges code, creates Picker session, stashes in KV
-  api/poll.js             TV polls this for the tokens+session
-  api/refresh.js          TV calls this instead of holding a client secret itself
+webapp/                 ← separate Next.js/Vercel deployment, NOT packaged into the TV app
+  app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + email
+  app/api/auth/tv-poll/route.js      TV polls this for the tokens
+  app/tv-login/page.js                mobile landing page, drives Supabase GitHub sign-in
+  lib/                                 cors.js, uuid.js, supabaseClient.js
 .github/workflows/deploy-webos.yml   ← package + Tailscale + install to TV
+pairing-backend/        ← RETIRED — superseded by webapp/api/auth/*, safe to delete
+                           once the new flow is confirmed working end-to-end
 ```
 
-## Security model (added after an explicit ask to lock this down)
-
-- `pairing-backend/api/start.js` requires `?key=<PAIRING_SHARED_SECRET>`
-  or refuses with 403 — stops a stranger who finds the `.vercel.app`
-  URL from spinning up OAuth consent flows against the project's own
-  Google Cloud app.
-- The `state` value sent to Google is HMAC-signed with that same
-  secret; `callback.js` verifies the signature before doing anything.
-  This closes the gap where someone copies the public `client_id` and
-  hits Google's consent screen directly, bypassing `start.js` entirely.
-- Caveat, stated plainly in both READMEs: the shared secret ships
-  inside the packaged TV app, so it's not secret from someone who
-  extracts the `.ipk`. It raises the bar against casual/remote
-  discovery of a public URL, nothing more.
-- `/api/poll` and `/api/refresh` weren't given the same gate —
-  unguessable random tokens (the pairing UUID, the refresh token) are
-  already the right protection for those; adding a shared secret there
-  wouldn't add real security, just friction.
-
-## Remote-control menu (repick / log out) + manual photo nav
+## Remote-control menu (log out) + manual photo nav
 
 While the slideshow is playing:
 
 - **Left/Right arrows** step to the previous/next photo immediately and
   reset the 15s auto-advance clock (`goToPrevSlide`/`goToNextSlide` →
-  `restartSlideTimer`), so manual browsing doesn't fight the timer.
-  `mediaItems` navigation is tracked via a single `displayedIndex`
-  (bidirectional, wraps both ways) rather than the old one-directional
-  `currentIndex`.
-- **Any other button** opens a small on-screen menu (D-pad left/right/
-  up/down moves focus between two real `<button>`s, OK activates via
+  `restartSlideTimer`). Unlike the old `mediaItems` array (a fixed,
+  pre-fetched list with a `displayedIndex`), photos are now fetched
+  one at a time from Supabase on demand — there's no fixed list to
+  index into. A small in-memory `history` buffer (last
+  `CONFIG.HISTORY_MAX`, currently 50) is what makes "previous" work at
+  all: Right past the end of the buffer fetches a fresh random photo;
+  Left walks backward through what's already been shown.
+- **Any other button** opens a small on-screen menu (OK activates via
   native browser behavior, auto-hides after 8s):
-  - **Repick Photos** — calls `POST /v1/sessions` on
-    `photospicker.googleapis.com` *directly from the TV* using the
-    already-valid access token, no pairing-backend involved. Safe
-    because session creation only needs a Bearer token, not the client
-    secret — same reason `getPickerSession`/`listPickedMediaItems`
-    already call Google directly. Only the fallback QR
-    (`pairing-step-media-fallback`) is shown, not the full sign-in QR —
-    user stays signed in, they're just picking a new selection.
-  - **Log Out** — clears both `localStorage` keys (refresh token +
-    Picker session id) and the in-memory access token, then calls
-    `boot()` again → falls through to the full `runPairing()` QR.
-  Both paths `clearInterval` the slideshow timer *and* the media-list
-  refresh timer first (`scheduleMediaListRefresh` tracks its interval
-  in module-level `mediaListRefreshTimer`, clearing any existing one on
-  entry — repicking twice, or repicking after a normal boot, never
-  stacks duplicate refresh intervals).
+  - **Log Out** — clears the Supabase session (`auth.signOut()`) and
+    calls `boot()` again → falls through to the full `runPairing()`
+    QR.
+  - There's **no "Repick Photos" anymore** — that was specific to
+    Picker sessions, which no longer exist. If a "shuffle now" /
+    "skip this one" button is wanted again, Right-arrow already does
+    that during manual browsing; nothing dedicated was added to the
+    menu for it. Flag if the user wants one.
 - **Back button**: webOS's remote Back key is inconsistent across
   firmware/remotes about what it reports — `isBackKey()` checks
   `e.keyCode === 461` (the actual LG-documented code) *and*
@@ -123,114 +118,130 @@ While the slideshow is playing:
 
 ## Screensaver suppression
 
-Two layers, tried in this order of reliability:
+Unchanged by the auth/data migration — still the same two layers:
 
 1. **`startKeepaliveVideo()`** (primary) — an invisible 1x1 muted
-   looping `<video src="keepalive.mp4">` (a ~1.5KB, 2s, black H.264
-   clip; regenerate with
-   `ffmpeg -f lavfi -i color=c=black:s=64x64:r=1:d=2 -an -c:v libx264
-   -profile:v baseline -pix_fmt yuv420p -movflags +faststart
-   keepalive.mp4` if it's ever lost). webOS explicitly exempts active
-   video playback from the screensaver at the OS level — this needs no
-   special permission, unlike the Luna approach below, so it isn't at
-   the mercy of what a third-party `.ipk` is allowed to call. Lives in
-   `src/`, so `ares-package src` picks it up automatically; no
-   packaging config changes needed.
+   looping `<video src="keepalive.mp4">`. webOS explicitly exempts
+   active video playback from the screensaver at the OS level — needs
+   no special permission, so it isn't at the mercy of what a
+   third-party `.ipk` is allowed to call.
 2. **`suppressScreenSaverViaLuna()`** (secondary, best-effort) — an
-   **undocumented** Luna handshake: subscribe to
-   `registerScreenSaverRequest`, and every time it calls back with
-   `state: "Active"`, reply via `responseScreenSaverRequest` with
-   `ack: false` to defer it.
-
-**First attempt at (2) alone didn't work** — almost certainly because
-`com.webos.service.tvpower` is a privileged system service, and a plain
-third-party `.ipk` (not homebrew-rooted, not LG-signed) is commonly
-denied access to it by the platform's ACG permission system, silently
-unless you're logging for it. It now logs both the registration result
-and every deferral, so `ares-inspect` will show plainly whether it's
-actually running — if `registerScreenSaverRequest denied` shows up in
-the console, that confirms the permission theory and (1) is doing all
-the real work, which is fine — (2) is a bonus, not load-bearing.
-
-**Known footgun, from other devs' reports, not yet hit here but worth
-knowing before touching (2)**: the `tvpower` service hands off a
-screensaver request and waits for a reply; if the *client* app closes
-while a request is mid-flight (rather than replying), the service can
-get stuck treating itself as busy and refuse every later screensaver
-request until the TV is power-cycled. Practically: don't add logic that
-closes/reloads the app while a `state: "Active"` callback might be
-outstanding, and if the screensaver ever seems to stop responding to
-this app's `ack: false` after an app crash/force-close during dev
-iteration, a TV power cycle is the known fix, not a code bug to chase.
+   **undocumented** Luna handshake against `com.webos.service.tvpower`;
+   likely denied outright by ACG permissions on a non-LG-signed `.ipk`,
+   which is why (1) is load-bearing and this is a bonus. Known footgun
+   (not yet hit here): if the client app closes mid-handshake, the
+   service can get stuck refusing all screensaver requests until a TV
+   power cycle — don't add logic that closes/reloads the app while a
+   `state: "Active"` callback might be outstanding.
 
 Both no-op harmlessly when testing via `npx serve .` in a desktop
-browser (no `WebOSServiceBridge`; the tiny video will actually play
-there too, harmlessly) — that's expected, not a bug to chase there.
+browser (no `WebOSServiceBridge`).
+
+**Separately**, there's a forked `webosbrew/custom-screensaver` repo
+(not this one) that renders this app as a true system-level
+screensaver via `file://` in a QML `WebEngineView`, for the rooted-TV
+setup. That fork is unaffected by this auth/data migration — it just
+loads whatever static files this app's own deploy already installed.
 
 ## Local config pattern
 
 `src/app.js` reads `window.APP_CONFIG` if present, else falls back to
-placeholder strings. `src/index.html` loads `secrets.local.js` (gitignored
-via the repo's `*secret*` pattern; `.gitignore` has a `!*secret*.example`
-exception so the example file itself stays tracked) right before
-`app.js`. Missing file → harmless 404 → placeholders stay in effect.
-The GitHub Action never touches this file; it does its own placeholder
+placeholder strings. `src/index.html` loads `secrets.local.js`
+(gitignored via the repo's `*secret*` pattern) right before `app.js`.
+Missing file → harmless 404 → placeholders stay in effect. The GitHub
+Action never touches this file; it does its own placeholder
 substitution directly into `app.js` at build time from repo secrets.
+Current placeholders (post-migration):
+
+- `CONFIG.WEBAPP_URL` ← `https://YOUR-WEBAPP.vercel.app`
+- `CONFIG.SUPABASE_URL` ← `https://YOUR-PROJECT.supabase.co`
+- `CONFIG.SUPABASE_ANON_KEY` ← `YOUR_SUPABASE_ANON_KEY`
+- `CONFIG.PHOTO_SERVER_URL` ← `http://YOUR-PHOTO-SERVER:PORT`
+
 This is *the* pattern to extend if a new config value needs both a
 local-testing path and a CI path — don't invent a second mechanism.
 
 ## Gotchas already hit and fixed (don't re-diagnose these)
 
+From the Google Photos era, still relevant to how this app is
+structured even though the specific APIs are gone:
+
 - **Boot screen stuck on spinner during sign-in**: was a real ordering
   bug — `boot()` called `showScreen("pairing")` only *after* awaiting
-  the full sign-in flow, so the pairing screen (with the code already
-  written into its DOM) stayed hidden behind the boot spinner the whole
-  time. Fixed by showing the pairing screen from inside the sign-in
-  function itself, before it starts polling.
-- **`{"error":"authorization_pending","error_description":"Precondition Required"}`**
-  in DevTools is *normal*, not a bug — it's Google's documented device-flow
-  response (HTTP 428) while waiting for the user to finish on their
-  phone. The polling code already handles it by design.
-- **Tailscale GitHub Action 403 `calling actor does not have enough
-  permissions`**: the OAuth client needs the **Auth Keys: Write** scope
-  specifically (a distinct entry from "Devices"/"OAuth clients" in the
-  scope picker), and the ACL's `tagOwners` must already contain the tag
-  before you scope a client to it.
-- **Grayscale "no entry" icon on slideshow start, `403` on
-  `lh3.googleusercontent.com` in the console**: `preload()` was setting
-  `img.src` directly to the Picker API `baseUrl` (with the size suffix).
-  Google's media `baseUrl`s (Library API and Picker API both) require
-  the OAuth access token as an `Authorization: Bearer` header on the
-  download request itself — a plain `<img src>` can't send that header,
-  so the browser's unauthenticated GET 403s. Fixed by fetching the
-  bytes with `fetch()` + the Bearer header, then pointing the `<img>` at
-  a `URL.createObjectURL(blob)` instead of the raw Google URL (with the
-  old blob URL revoked each cycle to avoid leaking memory on a
-  long-running TV app). Don't "simplify" `preload()` back to a bare
-  `img.src = url` — that's this bug again.
-- **`src/app.js` got corrupted once** via what looked like a partial
-  manual merge between the Ambient-API version and the Picker+pairing-
-  backend version (referenced undefined things like `getAmbientDevice`
-  and a bare `deviceId`). Restored from the known-good Picker version.
-  If app.js ever looks like it's mixing "device"/Ambient terminology
-  with "session"/Picker terminology again, that's the same failure mode
-  — restore from a clean version rather than trying to hand-patch it.
+  the full sign-in flow. Fixed by showing the pairing screen from
+  inside the sign-in function itself, before it starts polling. The
+  current `runPairing()` still follows this ordering — don't move the
+  `showScreen("pairing")` call back to `boot()`.
+- **`src/app.js` got corrupted once** via a partial manual merge
+  between two old versions. If `app.js` ever looks like it's mixing
+  terminology from two different eras (Picker `mediaItems`/`baseUrl`
+  showing up alongside Supabase/`wa`/`hashes` code, say), that's the
+  same failure mode — restore from a clean version rather than
+  hand-patching it.
+- **Vercel functions don't send CORS headers by default** — hit this
+  with the old `pairing-backend/api/poll.js`/`refresh.js`, and it
+  applies equally to the new `webapp/app/api/auth/*` routes for the
+  same reason (TV calls them cross-origin). Both new routes already
+  have CORS + `OPTIONS` handling; if a future route is added under
+  `api/auth/`, don't forget it there too.
+- **PostgREST has no `order by random()`** via the query builder —
+  `fetchRandomPhoto()` in the new `app.js` does count-then-offset
+  instead (two round trips). If this ever needs to become one round
+  trip, that's a Postgres RPC function, not a query-builder trick —
+  matches the RPC pattern `photo-match-next` already uses for its own
+  distance queries.
+
+## History: the Google Photos era (retired, kept for context)
+
+Skip this unless you're trying to understand why `pairing-backend/`
+exists or why the repo still has Picker-era references lying around
+mid-migration. Three approaches were tried before landing on the
+current Supabase/local-DB architecture:
+
+1. **Library API `mediaItems:search`** — Google removed general
+   library search from this endpoint on April 1, 2025; dead end.
+2. **Photos Ambient API** — the best architectural fit (a persistent
+   "device" + ongoing curated feed), but gated behind Google's **Photos
+   Partner Program**, not self-serve; dead end for a personal project.
+3. **Photos Picker API** — no partner approval needed, but its scope
+   isn't on Google's Device Authorization Grant allow-list, so OAuth
+   had to go through a standard Authorization Code flow instead, which
+   needs a real HTTPS redirect URI a TV app can't provide alone —
+   hence `pairing-backend/`, a small Vercel service doing that OAuth
+   exchange server-side.
+
+That whole chain (and `pairing-backend/` with it) was retired in favor
+of the current architecture because the *photo source itself* changed
+— photos now come from a personal database (`wa`/`hashes`, fed by a
+separate `phash` ingest project) rather than a live Google Photos
+album, so there's no Google Photos API of any kind left to work
+around. The Supabase GitHub SSO + Vercel KV handoff exists purely to
+solve the same "TV has no browser-based OAuth redirect" problem the
+old pairing-backend solved, just for a much simpler auth need (no
+third-party API scope headaches, just "prove you're the one allowed
+GitHub account").
 
 ## Open items / things a new session might need to pick up
 
-- The user has NOT yet been confirmed to have completed the actual
-  pairing-backend Vercel deployment + Google "Web application" OAuth
-  client setup end-to-end on real infrastructure — verify current status
-  before assuming it's live.
-- `PAIRING_SHARED_SECRET` needs to be set identically in three places:
-  the Vercel env var, the GitHub repo secret, and (for local testing
-  only) `src/secrets.local.js`. If pairing starts failing with a 403
-  from `/api/start`, mismatch between these is the first thing to check.
-- Full secret/env-var inventory:
+- Confirm the Supabase RLS policies on `wa`/`hashes` actually exist in
+  the live database (see README.md) — without them the TV app fails
+  silently (empty results, not an error).
+- Confirm `wa.filetype`'s actual stored values match
+  `CONFIG.IMAGE_FILETYPES` (`["image", "image/jpeg"]`) — a
+  `select distinct filetype from wa` was recommended but not yet
+  confirmed run.
+- `pairing-backend/` and its Vercel project/env vars are still live as
+  of this writing — retire them once the new flow is confirmed working
+  end-to-end on the real TV.
+- Full secret/env-var inventory (current):
   - **GitHub repo secrets**: `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`,
     `WEBOS_TV_SSH_KEY_B64`, `WEBOS_TV_HOST`, `TV_PASSPHRASE`,
-    `WEBOS_APP_ID`, `PAIRING_BACKEND_URL`, `PAIRING_SHARED_SECRET`
-  - **Vercel (pairing-backend) env vars**: `GOOGLE_CLIENT_ID`,
-    `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`,
-    `PAIRING_SHARED_SECRET`, plus `KV_REST_API_URL`/`KV_REST_API_TOKEN`
-    (auto-injected by attaching a Vercel KV database)
+    `WEBOS_APP_ID`, `WEBAPP_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+    `PHOTO_SERVER_URL`
+  - **Vercel (webapp) env vars**: `NEXT_PUBLIC_SUPABASE_URL`,
+    `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAIL`, plus
+    `KV_REST_API_URL`/`KV_REST_API_TOKEN` (auto-injected by attaching a
+    Vercel KV database)
+  - **Supabase dashboard**: Auth → URL Configuration → Redirect URLs
+    must include `https://<webapp>/tv-login` (and the localhost
+    equivalent for local testing)
