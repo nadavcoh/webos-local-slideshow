@@ -62,11 +62,18 @@ jobs:
       # ----------------------------------------------------------------
       # Inject secrets into the source tree right before packaging, so
       # the repo itself only ever contains placeholder values:
-      #   src/app.js       → CONFIG.PAIRING_BACKEND_URL / PAIRING_SHARED_SECRET
+      #   src/app.js       → CONFIG.WEBAPP_URL / SUPABASE_URL /
+      #                       SUPABASE_ANON_KEY / PHOTO_SERVER_URL
       #   src/appinfo.json → "id", "vendor"
-      # There's no Google client ID/secret to inject here anymore —
-      # those live only in the pairing-backend/ deployment's own env
-      # vars (see pairing-backend/README.md), never in this app.
+      # There's no pairing-backend/ shared secret to inject anymore —
+      # that whole service (and its Google client ID/secret) is
+      # retired now that auth goes through the web app's Supabase
+      # GitHub SSO + tv-handoff/tv-poll routes instead. The Supabase
+      # anon key is injected here too, same as the URL — it's meant to
+      # be public/embedded client-side (RLS is the real access
+      # control), not a secret in the sensitive sense, but it still
+      # lives in a repo secret rather than being hardcoded so it can
+      # be rotated without a code change.
       # "vendor" is dropped in automatically from the repo owner, no
       # secret needed for it.
       # Fails loudly if a placeholder has drifted (e.g. someone edited
@@ -74,16 +81,20 @@ jobs:
       # ----------------------------------------------------------------
       - name: Inject config into app.js and appinfo.json
         env:
-          PAIRING_BACKEND_URL: ${{ secrets.PAIRING_BACKEND_URL }}
-          PAIRING_SHARED_SECRET: ${{ secrets.PAIRING_SHARED_SECRET }}
+          WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          PHOTO_SERVER_URL: ${{ secrets.PHOTO_SERVER_URL }}
           WEBOS_APP_ID: ${{ secrets.WEBOS_APP_ID }}
           WEBOS_VENDOR: ${{ github.repository_owner }}
         run: |
           node -e '
             const fs = require("fs");
             const replacements = {
-              "https://YOUR-PAIRING-BACKEND.vercel.app": process.env.PAIRING_BACKEND_URL,
-              "YOUR_PAIRING_SHARED_SECRET": process.env.PAIRING_SHARED_SECRET,
+              "https://YOUR-WEBAPP.vercel.app": process.env.WEBAPP_URL,
+              "https://YOUR-PROJECT.supabase.co": process.env.SUPABASE_URL,
+              "YOUR_SUPABASE_ANON_KEY": process.env.SUPABASE_ANON_KEY,
+              "http://YOUR-PHOTO-SERVER:PORT": process.env.PHOTO_SERVER_URL,
             };
             let js = fs.readFileSync("src/app.js", "utf8");
             for (const [placeholder, value] of Object.entries(replacements)) {
