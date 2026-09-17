@@ -63,7 +63,7 @@ const CONFIG = {
 
   // wa.filetype values considered "an image" — adjust here if the
   // actual stored values turn out to differ (see README.md note).
-  IMAGE_FILETYPES: ["image", "image/jpeg"],
+  IMAGE_FILETYPES: ["Image", "image/jpeg"],
 };
 
 /* ---------------------- SUPABASE CLIENT ---------------------- */
