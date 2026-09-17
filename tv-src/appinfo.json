@@ -1,0 +1,18 @@
+{
+  "id": "com.yourdomain.ambientphotos",
+  "version": "1.0.0",
+  "vendor": "Your Name",
+  "type": "web",
+  "main": "index.html",
+  "title": "Ambient Photos",
+  "icon": "icon.png",
+  "largeIcon": "icon.png",
+  "bgColor": "#000000",
+  "resolution": "1920x1080",
+  "iconColor": "#000000",
+  "disableBackHistoryAPI": true,
+  "handlesRelaunch": false,
+  "requiredPermissions": [
+    "internet"
+  ]
+}
