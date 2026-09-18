@@ -15,12 +15,13 @@
  *   3. Once tokens arrive, hydrate a local Supabase session with
  *      supabase.auth.setSession(). From here on, supabase-js manages
  *      token refresh on its own.
- *   4. Slideshow photos are NOT a pre-fetched playlist. Each slide
- *      queries the `wa` table for one random eligible row, joins
- *      against `hashes` for filename/location/timestamp, and builds
- *      the image URL against the local photo HTTP server. A small
- *      in-memory history buffer makes manual Left/Right (prev/next)
- *      navigation possible despite each photo being fetched fresh.
+ *   4. Slideshow photos are NOT a pre-fetched playlist in the sense of
+ *      one big upfront list, but they aren't fetched strictly
+ *      one-at-a-time either: a small forward queue
+ *      (CONFIG.PREFETCH_DEPTH) keeps a few upcoming photos already
+ *      fetched AND image-preloaded, so skipping ahead doesn't wait on
+ *      a fresh round trip. A separate in-memory history buffer makes
+ *      manual Left (previous) possible on top of that.
  *
  * CONFIG VALUES: loaded from window.APP_CONFIG if present (see
  * secrets.local.js.example — copy it to secrets.local.js, gitignored,
@@ -60,6 +61,7 @@ const CONFIG = {
   // Slideshow behavior
   SLIDE_INTERVAL_MS: 15 * 1000, // 15 seconds per requirement
   HISTORY_MAX: 50, // how many recently-shown photos Left/Right can browse back through
+  PREFETCH_DEPTH: 3, // how many upcoming photos to have fetched + image-preloaded ahead of time
 
   // wa.filetype values considered "an image" — adjust here if the
   // actual stored values turn out to differ (see README.md note).
@@ -261,7 +263,13 @@ function parseLocationName(raw) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  return lines[0] || "";
+  const name = lines[0] || "";
+  // Google Photos shows this literal placeholder when a photo has no
+  // location tagged at all — it's not a real place name, so treat it
+  // the same as an empty field (formatLocation falls back to coords,
+  // then to nothing).
+  if (name.toLowerCase() === "add a location") return "";
+  return name;
 }
 
 /** hashes.location looks like "https://www.google.com/maps?q=loc:LAT,LNG". */
@@ -307,6 +315,16 @@ let slideTimer = null;
 let history = [];
 let historyIndex = -1; // pointer into history; -1 = nothing shown yet
 
+// Forward-looking counterpart to `history`: photos already fetched
+// from Supabase AND already image-preloaded, ready to display
+// instantly. Without this, every skip (manual or auto-advance) would
+// have to wait on a full round trip plus an image load before
+// anything appeared. `renderPhoto` still calls `preloadImage` itself
+// when consuming from here, but since the browser already has the
+// image cached from the prefetch, that resolves near-instantly.
+let upcoming = [];
+let toppingUpQueue = false; // guards against overlapping top-up calls
+
 /** Local HTTP server is assumed unauthenticated on the home LAN, so a
  *  plain <img> load (no Bearer-token blob workaround like the old
  *  Google Photos code needed) is enough. */
@@ -317,6 +335,49 @@ function preloadImage(url) {
     img.onerror = () => reject(new Error(`Image failed to load: ${url}`));
     img.src = url;
   });
+}
+
+/** Fetches one random photo's metadata and preloads its image before
+ *  resolving, so it's cache-ready by the time it's actually shown. */
+async function fetchAndPreloadOne() {
+  const meta = await fetchRandomPhoto();
+  await preloadImage(photoImageUrl(meta));
+  return meta;
+}
+
+/** Tops the prefetch queue back up to CONFIG.PREFETCH_DEPTH, one photo
+ *  at a time. Fire-and-forget from callers — never awaited on the
+ *  critical path of showing the current slide. Stops (rather than
+ *  retrying in a tight loop) on the first failure; the next slide
+ *  advance calls this again anyway. */
+async function topUpQueue() {
+  if (toppingUpQueue) return;
+  toppingUpQueue = true;
+  try {
+    while (upcoming.length < CONFIG.PREFETCH_DEPTH) {
+      try {
+        upcoming.push(await fetchAndPreloadOne());
+      } catch (err) {
+        console.error("Prefetch failed, will retry on next advance:", err);
+        break;
+      }
+    }
+  } finally {
+    toppingUpQueue = false;
+  }
+}
+
+/** Returns the next not-yet-shown photo: from the prefetch queue if
+ *  it's ready, or fetched inline as a fallback (e.g. right at boot,
+ *  before the first top-up has had time to finish). */
+async function takeNextUpcoming() {
+  if (upcoming.length > 0) return upcoming.shift();
+  try {
+    return await fetchAndPreloadOne();
+  } catch (err) {
+    console.error("Failed to fetch next photo:", err);
+    return null;
+  }
 }
 
 /** Loads and crossfades in a specific photo's metadata. Returns false
@@ -342,30 +403,26 @@ async function renderPhoto(meta) {
   return true;
 }
 
-async function fetchAndPushRandomPhoto() {
-  const meta = await fetchRandomPhoto();
-  history.push(meta);
-  if (history.length > CONFIG.HISTORY_MAX) history.shift();
-  historyIndex = history.length - 1;
-  return meta;
-}
-
 async function showNextSlide() {
   let meta;
+  let consumedFromQueue = false;
+
   if (historyIndex < history.length - 1) {
     // Stepped backward manually earlier — walk forward through the
-    // buffered history before fetching anything new.
+    // buffered history before touching the prefetch queue at all.
     historyIndex++;
     meta = history[historyIndex];
   } else {
-    try {
-      meta = await fetchAndPushRandomPhoto();
-    } catch (err) {
-      console.error("Failed to fetch next photo:", err);
-      return; // next timer tick retries
-    }
+    meta = await takeNextUpcoming();
+    if (!meta) return; // next timer tick retries
+    consumedFromQueue = true;
+    history.push(meta);
+    if (history.length > CONFIG.HISTORY_MAX) history.shift();
+    historyIndex = history.length - 1;
   }
+
   const ok = await renderPhoto(meta);
+  if (consumedFromQueue) topUpQueue(); // fire-and-forget; refill what was just consumed
   if (!ok) showNextSlide(); // skip a broken row, try another immediately
 }
 
@@ -395,6 +452,7 @@ function goToPrevSlide() {
 
 function startSlideshow() {
   showScreen("slideshow");
+  topUpQueue(); // fire-and-forget; fills in parallel with the first fetch below
   showNextSlide();
   restartSlideTimer();
 }
