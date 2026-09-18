@@ -77,6 +77,13 @@
        No bundler/ES-modules step in this plain webOS app, so the CDN
        build (not the npm package) is the right fit here. -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- HEIC/HEIF decode (WASM build of libheif), vendored locally
+       rather than CDN-loaded — see vendor/libheif/VENDORED.md.
+       heic-worker.js loads its own copy of this same file via
+       importScripts(); this main-thread copy (window.libheif) is only
+       used as a fallback if that worker can't start — see
+       getHeicWorker()/decodeHeicOnMainThread() in app.js. -->
+  <script src="vendor/libheif/libheif-bundle.js"></script>
   <!-- Local-only overrides for WEBAPP_URL / SUPABASE_URL /
        SUPABASE_ANON_KEY / PHOTO_SERVER_URL when testing with
        `npx serve .`. Copy secrets.local.js.example to secrets.local.js

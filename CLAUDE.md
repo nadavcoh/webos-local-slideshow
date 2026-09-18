@@ -76,6 +76,8 @@ error.** See README.md for the policy SQL.
 ```
 src/                    ← the actual webOS app (ares-package src)
   app.js                  Supabase/KV pairing client, wa/hashes fetching, slideshow
+  heic-worker.js          off-main-thread HEIC->JPEG decode (see "HEIC photos" below)
+  vendor/libheif/         vendored WASM build of libheif used by heic-worker.js + app.js
   index.html, style.css, appinfo.json, icon.png
   secrets.local.js.example  copy → secrets.local.js (gitignored) for local testing
 webapp/                 ← separate Next.js/Vercel deployment, NOT packaged into the TV app
@@ -125,6 +127,63 @@ While the slideshow is playing:
   a given TV, use `ares-inspect` (remote Chrome DevTools) to check what
   that specific remote actually sends and add it to `isBackKey()` —
   don't just swap which key is checked.
+
+## HEIC photos
+
+`wa.filetype` doesn't distinguish HEIC from JPEG — WhatsApp media rows
+are just generically `"Image"` — so HEIC files pass
+`CONFIG.IMAGE_FILETYPES` and reach the browser, where a plain `<img>`
+silently fails (webOS's Chromium has no native HEIC decoder; that
+codec is WebKit/Safari-only). Fixed by decoding HEIC → JPEG on the TV
+itself, in `heic-worker.js`, using a vendored WASM build of libheif
+(`vendor/libheif/`) — not on the LAN photo server, even though that
+machine (a much older Sandy Bridge laptop) is individually not
+obviously slower at this than the TV. The server also runs Plex,
+qBittorrent, the full `*arr` stack, Tautulli, Tailscale, and a
+SeleniumBase/Chrome scraper on only 4GB RAM — genuinely contended —
+whereas the TV does nothing else, and this decode is small/bursty
+(one photo every 15s, a few prefetched ahead), so it's a better fit
+for "has idle time to spare" than "wins a benchmark."
+
+- `isHeic()` checks the filename extension; only `.heic`/`.heif` files
+  take this path, everything else uses the LAN server URL directly.
+- The decode runs in `heic-worker.js` (a Worker) so it can't stall the
+  main thread — the crossfade timer, remote-key handling, and the menu
+  auto-hide timer all live there. `getHeicWorker()` in `app.js` starts
+  it lazily on first use.
+- **Untested fallback**: if the Worker can't start at all — the app
+  runs from `file:///media/developer/apps/usr/palm/applications/<id>/`
+  once installed on a real TV, and some webOS/Chromium builds are
+  known to restrict Worker creation from a `file://` origin — the same
+  decode runs on the main thread instead (`decodeHeicOnMainThread()`),
+  briefly blocking but still correct. Same if the worker crashes
+  mid-session (`onerror`) — it's marked broken and every HEIC photo
+  after that falls back too, without retrying a dead worker each time.
+  Check `ares-inspect` logs the first time this runs on the real TV
+  for "Could not start HEIC worker" / "HEIC worker crashed" to know
+  which path it's actually taking; if it's always the fallback, the
+  Worker restriction guess above was right and there'd be no reason to
+  keep the Worker path around.
+- The decoded JPEG becomes a `blob:` URL stored on `meta.displayUrl`;
+  `renderPhoto()` uses that instead of re-deriving the server URL.
+  **These are not cleaned up automatically** — `revokeDisplayUrl()` is
+  called exactly at the two points a photo is actually discarded
+  (evicted from `history` past `CONFIG.HISTORY_MAX`, or on `logOut()`
+  clearing `history`). `upcoming` is deliberately left alone on
+  logout — those photos are still valid and get shown after
+  re-pairing. Don't add a new place metas get discarded without also
+  revoking there — this app runs unattended for weeks, so a missed
+  case is a slow memory leak, not an immediate bug.
+- `vendor/libheif/libheif-bundle.js` is loaded twice on purpose: once
+  via `importScripts()` inside the worker, once via a `<script>` tag
+  in `index.html` for the main-thread fallback path. Don't switch
+  either one to the CDN version (`jsdelivr`) `qrcode`/`supabase-js`
+  use — an unreachable CDN mid-decode is a worse failure mode here
+  than for a page's initial load, and the worker needs a same-origin
+  script to `importScripts()` cleanly anyway.
+- `CONFIG.HEIC_JPEG_QUALITY` (0.9) is the only tuning knob — lower it
+  if decoded blob sizes/memory ever become a concern; there's no
+  reason to expect they will at one photo every 15s.
 
 ## Screensaver suppression
 
@@ -213,6 +272,11 @@ structured even though the specific APIs are gone:
   `renderPhoto()`/`formatLocation()` even for a "quick fix" — that
   would reintroduce exactly the latency the prefetch queue exists to
   avoid.
+- **`preloadImage(photoImageUrl(meta))` alone doesn't work for every
+  photo** — some `wa`/`hashes` rows are HEIC files, which no webOS
+  Chromium build decodes natively. See "HEIC photos" above; don't
+  re-diagnose "Image failed to load" errors as a server/network
+  problem without first checking `meta.filename`'s extension.
 - **Nominatim throttling is app-wide, not per-caller** — `geocodeChain`
   serializes every `reverseGeocode()` call through one queue regardless
   of how many photos are being prefetched concurrently. If a second,

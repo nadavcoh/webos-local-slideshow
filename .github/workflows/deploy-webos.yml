@@ -8,6 +8,8 @@ on:
     paths:
       - "src/index.html"
       - "src/app.js"
+      - "src/heic-worker.js"
+      - "src/vendor/**"
       - "src/style.css"
       - "src/appinfo.json"
       - "src/icon.png"

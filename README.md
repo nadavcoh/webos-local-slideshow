@@ -36,6 +36,8 @@ webos-photos-slideshow/
 │   ├── index.html                ← markup for pairing screen + slideshow
 │   ├── style.css                  ← dark-mode lean-back styling, crossfade CSS
 │   ├── app.js                      ← Supabase/KV pairing client, wa/hashes fetching, slideshow engine
+│   ├── heic-worker.js               ← off-main-thread HEIC→JPEG decode (see CLAUDE.md "HEIC photos")
+│   ├── vendor/libheif/               ← vendored WASM build of libheif used by heic-worker.js
 │   └── secrets.local.js.example     ← copy to secrets.local.js (gitignored) for local testing
 ├── .github/workflows/          ← GitHub Action: package + deploy to the TV over Tailscale
 ├── webapp/                      ← Next.js app — a SEPARATE Vercel deployment, never packaged into the TV app
@@ -397,6 +399,11 @@ diverged from a "textbook" version in a few deliberate ways:
   on `["image", "image/jpeg"]` per spec; run
   `select distinct filetype from wa` against your actual data and
   adjust if it stores something else.
+- **HEIC photos** decode to JPEG on the TV itself before display,
+  since webOS's Chromium can't render HEIC natively — see CLAUDE.md's
+  "HEIC photos" section for how and why. Nothing to configure; it's
+  automatic based on filename extension. `CONFIG.HEIC_JPEG_QUALITY`
+  (0.9) is the one tuning knob, if decoded file sizes ever matter.
 - webOS's browser engine is Chromium-based and modern enough for all the
   `fetch`/`async`/`URLSearchParams` used here, but if you're targeting a
   very old webOS 4 firmware revision, test on the actual TV early —

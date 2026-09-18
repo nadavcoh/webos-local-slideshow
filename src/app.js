@@ -67,6 +67,10 @@ const CONFIG = {
   // wa.filetype values considered "an image" — adjust here if the
   // actual stored values turn out to differ (see README.md note).
   IMAGE_FILETYPES: ["Image", "image/jpeg"],
+
+  // JPEG quality used when re-encoding a decoded HEIC photo (see "HEIC
+  // handling" below) — 0..1, passed straight to canvas.toBlob().
+  HEIC_JPEG_QUALITY: 0.9,
 };
 
 /* ---------------------- SUPABASE CLIENT ---------------------- */
@@ -395,6 +399,170 @@ function photoImageUrl(meta) {
 }
 
 /* ============================================================
+ * HEIC handling
+ *
+ * webOS's Chromium build has no native HEIC decoder (that codec is
+ * WebKit/Safari-only) — a plain <img> silently fails on these even
+ * though the LAN photo server serves the bytes fine (200 OK, visible
+ * in its own access log). `wa.filetype` doesn't distinguish HEIC from
+ * JPEG (WhatsApp media rows are just generically "Image"), so these
+ * reach the browser and only fail once it tries to decode them.
+ *
+ * Rather than converting at ingest time or on the LAN server, this
+ * decodes HEIC -> JPEG right here on the TV, in a Web Worker, using a
+ * locally vendored WASM build of libheif (vendor/libheif/) — see
+ * CLAUDE.md for the full reasoning on why the TV rather than the
+ * server. If the worker can't start at all (untested: some webOS
+ * builds restrict Worker creation from a file:// origin, which is how
+ * this app actually runs once installed), everything below falls
+ * back to running the same decode on the main thread instead — slower
+ * and briefly blocking, but still correct. Watch `ares-inspect` the
+ * first time this runs on the real TV for either the worker-crashed
+ * console.error below or "Could not start HEIC worker" to know which
+ * path it's actually taking.
+ * ============================================================ */
+
+function isHeic(filename) {
+  return /\.hei[cf]$/i.test(filename || "");
+}
+
+let heicWorker = null;
+let heicWorkerBroken = false;
+let heicRequestId = 0;
+const heicPending = new Map(); // id -> {resolve, reject}
+
+/** Lazily starts the HEIC decode worker on first use. Returns null
+ *  (rather than throwing) once the worker is known to be unusable, so
+ *  callers can fall back to decoding on the main thread instead. */
+function getHeicWorker() {
+  if (heicWorkerBroken) return null;
+  if (heicWorker) return heicWorker;
+
+  try {
+    heicWorker = new Worker("heic-worker.js");
+  } catch (err) {
+    console.error("Could not start HEIC worker, decoding on the main thread instead:", err);
+    heicWorkerBroken = true;
+    return null;
+  }
+
+  heicWorker.onmessage = (e) => {
+    const { id, width, height, buffer, error } = e.data;
+    const pending = heicPending.get(id);
+    if (!pending) return; // stale/unknown id — ignore
+    heicPending.delete(id);
+    if (error) pending.reject(new Error(error));
+    else pending.resolve({ width, height, buffer });
+  };
+
+  // If the worker dies mid-flight (crash, uncaught exception loading
+  // the vendored bundle, etc.), every request currently in flight for
+  // it can never resolve — reject them explicitly rather than hanging
+  // a prefetch forever, and mark the worker broken so later HEIC
+  // photos fall back to the main thread instead of retrying a dead
+  // worker every time.
+  heicWorker.onerror = (err) => {
+    console.error("HEIC worker crashed — decoding on the main thread from now on:", (err && err.message) || err);
+    heicWorkerBroken = true;
+    heicWorker.terminate();
+    heicWorker = null;
+    heicPending.forEach(({ reject }) => reject(new Error("HEIC worker crashed.")));
+    heicPending.clear();
+  };
+
+  return heicWorker;
+}
+
+function decodeHeicViaWorker(worker, arrayBuffer) {
+  const id = ++heicRequestId;
+  return new Promise((resolve, reject) => {
+    heicPending.set(id, { resolve, reject });
+    // Transfer the buffer into the worker rather than copying it —
+    // it's a few MB for a typical phone photo.
+    worker.postMessage({ id, bytes: arrayBuffer }, [arrayBuffer]);
+  }).then(rgbaToJpegBlob);
+}
+
+/** Same decode, run synchronously on the main thread — the fallback
+ *  path when the Worker itself couldn't start (see getHeicWorker).
+ *  window.libheif here comes from the same vendored bundle loaded via
+ *  <script> in index.html. */
+function decodeHeicOnMainThread(arrayBuffer) {
+  // eslint-disable-next-line no-undef
+  const decoder = new libheif.HeifDecoder();
+  const images = decoder.decode(new Uint8Array(arrayBuffer));
+  const image = images && images[0];
+  if (!image) return Promise.reject(new Error("No image found in HEIC data."));
+
+  const width = image.get_width();
+  const height = image.get_height();
+  const rgba = new Uint8ClampedArray(width * height * 4);
+
+  return new Promise((resolve, reject) => {
+    image.display({ data: rgba, width, height }, (displayData) => {
+      if (!displayData) reject(new Error("libheif image.display() failed."));
+      else resolve({ width, height, buffer: rgba.buffer });
+    });
+  }).then(rgbaToJpegBlob);
+}
+
+/** Shared final step for both decode paths above: paint raw RGBA
+ *  pixels onto a plain <canvas> and re-encode as JPEG. This needs the
+ *  main thread either way (no OffscreenCanvas dependency — see
+ *  heic-worker.js's header comment), but it's a native browser
+ *  operation, not JS-level pixel work, so it's cheap relative to the
+ *  actual HEIF decode. */
+function rgbaToJpegBlob({ width, height, buffer }) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(buffer), width, height), 0, 0);
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("canvas.toBlob() produced no JPEG blob."))),
+      "image/jpeg",
+      CONFIG.HEIC_JPEG_QUALITY
+    );
+  });
+}
+
+function decodeHeicToJpegBlob(arrayBuffer) {
+  const worker = getHeicWorker();
+  return worker ? decodeHeicViaWorker(worker, arrayBuffer) : decodeHeicOnMainThread(arrayBuffer);
+}
+
+/** Returns the URL renderPhoto/preloadImage should actually use: the
+ *  LAN server URL directly for anything the browser can decode
+ *  natively, or a locally-decoded blob: URL for HEIC/HEIF. The caller
+ *  is responsible for eventually revoking that blob URL (see
+ *  revokeDisplayUrl) — it isn't cleaned up automatically, and this
+ *  app runs unattended for weeks at a time. */
+async function resolvePhotoDisplayUrl(meta) {
+  const rawUrl = photoImageUrl(meta);
+  if (!isHeic(meta.filename)) return rawUrl;
+
+  const res = await fetch(rawUrl);
+  if (!res.ok) throw new Error(`Photo server returned ${res.status} for ${meta.filename}`);
+  const bytes = await res.arrayBuffer();
+  const jpegBlob = await decodeHeicToJpegBlob(bytes);
+  return URL.createObjectURL(jpegBlob);
+}
+
+/** Releases a blob: URL created by resolvePhotoDisplayUrl. Safe to
+ *  call on any meta, HEIC-derived or not — a no-op on a plain server
+ *  URL. Must be called exactly once a photo is truly done with
+ *  (evicted from history, or discarded on logout): call it too early
+ *  and a still-visible/still-navigable-back-to <img> goes blank;
+ *  never call it and the app slowly leaks memory over its normal
+ *  weeks-at-a-time uptime. */
+function revokeDisplayUrl(meta) {
+  if (meta && meta.displayUrl && meta.displayUrl.startsWith("blob:")) {
+    URL.revokeObjectURL(meta.displayUrl);
+  }
+}
+
+/* ============================================================
  * STEP C — Slideshow engine
  * ============================================================ */
 
@@ -430,17 +598,30 @@ function preloadImage(url) {
   });
 }
 
-/** Fetches one random photo's metadata, preloads its image, and
- *  reverse-geocodes its coordinates (if any) — all before resolving,
- *  so everything renderPhoto/formatLocation need is already on `meta`
- *  by the time this photo is actually shown. Image preload and
- *  geocoding are independent network calls to different services, so
- *  they run concurrently rather than one after another. */
+/** Resolves the URL renderPhoto should actually display — decoding
+ *  HEIC to a blob: URL first if needed (see resolvePhotoDisplayUrl)
+ *  — and confirms the browser can load it, storing the result on
+ *  `meta.displayUrl`. Split out from fetchAndPreloadOne so it can run
+ *  concurrently with reverseGeocode below, same as the plain
+ *  preloadImage() call this replaces did before HEIC support existed. */
+async function resolveAndPreload(meta) {
+  const displayUrl = await resolvePhotoDisplayUrl(meta);
+  await preloadImage(displayUrl);
+  meta.displayUrl = displayUrl;
+}
+
+/** Fetches one random photo's metadata, preloads its (possibly
+ *  HEIC-decoded) image, and reverse-geocodes its coordinates (if any)
+ *  — all before resolving, so everything renderPhoto/formatLocation
+ *  need is already on `meta` by the time this photo is actually
+ *  shown. Image resolution/preload and geocoding are independent
+ *  network calls to different services, so they run concurrently
+ *  rather than one after another. */
 async function fetchAndPreloadOne() {
   const meta = await fetchRandomPhoto();
   const coords = parseMapsCoords(meta.location);
   const [, geocodedPlace] = await Promise.all([
-    preloadImage(photoImageUrl(meta)),
+    resolveAndPreload(meta),
     coords ? reverseGeocode(coords) : Promise.resolve(null),
   ]);
   meta.geocodedPlace = geocodedPlace;
@@ -486,7 +667,12 @@ async function takeNextUpcoming() {
  *  (without throwing) if the image failed to load, so callers can
  *  move on rather than getting stuck on one broken row. */
 async function renderPhoto(meta) {
-  const url = photoImageUrl(meta);
+  // meta.displayUrl is set during prefetch (see resolveAndPreload) —
+  // for HEIC photos this is a blob: URL from the on-TV decode.
+  // Falling back to the raw server URL here would just reproduce the
+  // original "Image failed to load" bug for those photos, so only
+  // fall back to it for metas that somehow skipped prefetch entirely.
+  const url = meta.displayUrl || photoImageUrl(meta);
   try {
     await preloadImage(url);
   } catch (e) {
@@ -519,7 +705,9 @@ async function showNextSlide() {
     if (!meta) return; // next timer tick retries
     consumedFromQueue = true;
     history.push(meta);
-    if (history.length > CONFIG.HISTORY_MAX) history.shift();
+    // Evicting from history is the one place a shown photo is truly
+    // discarded (see revokeDisplayUrl) — release its blob: URL, if any.
+    if (history.length > CONFIG.HISTORY_MAX) revokeDisplayUrl(history.shift());
     historyIndex = history.length - 1;
   }
 
@@ -572,6 +760,10 @@ function startSlideshow() {
  *  instead.) */
 async function logOut() {
   clearInterval(slideTimer);
+  // `upcoming` is intentionally left alone here — those photos (and
+  // any blob: URLs already decoded for them) are still valid and get
+  // shown after re-pairing; `history` is what's actually discarded.
+  history.forEach(revokeDisplayUrl);
   history = [];
   historyIndex = -1;
 
