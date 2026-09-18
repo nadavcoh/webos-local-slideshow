@@ -6,7 +6,7 @@
   "main": "index.html",
   "title": "Ambient Photos",
   "icon": "icon.png",
-  "largeIcon": "icon.png",
+  "largeIcon": "largeIcon.png",
   "bgColor": "#000000",
   "resolution": "1920x1080",
   "iconColor": "#000000",

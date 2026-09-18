@@ -13,6 +13,7 @@ on:
       - "src/style.css"
       - "src/appinfo.json"
       - "src/icon.png"
+      - "src/largeIcon.png"
   workflow_dispatch: {}
 
 jobs:
@@ -113,50 +114,57 @@ jobs:
           mv src/appinfo.json.tmp src/appinfo.json
 
       # ----------------------------------------------------------------
-      # Optional: overwrite the placeholder src/icon.png with a real one
-      # from a repo secret, right before packaging — same idea as the
-      # config injection above, so the repo itself only ever commits a
-      # placeholder icon. Skipped entirely (not a failure) if the
-      # secret isn't set, so this is opt-in. When it IS set, validated
-      # strictly: webOS's appinfo.json points both "icon" and
-      # "largeIcon" at this same 80x80 file (see README), and a
-      # malformed/wrong-size icon fails at ares-package time with a
-      # much less obvious error than failing here does.
+      # Optional: overwrite the placeholder src/icon.png / src/largeIcon.png
+      # with real ones from a repo secret, right before packaging — same
+      # idea as the config injection above, so the repo itself only ever
+      # commits placeholders. Skipped entirely (not a failure) if the
+      # secret isn't set. WEBOS_APP_ICON_B64 holds the 130x130 largeIcon
+      # only — the 80x80 icon is generated from it here (via sharp) rather
+      # than needing a second secret, so there's exactly one source image
+      # to keep in sync. Both are validated strictly: appinfo.json points
+      # "icon"/"largeIcon" at these exact files, and a malformed/wrong-size
+      # source image fails at ares-package time with a much less obvious
+      # error than failing here does.
       # ----------------------------------------------------------------
-      - name: Inject app icon
+      - name: Inject app icons
+        if: ${{ secrets.WEBOS_APP_ICON_B64 != '' }}
         env:
           WEBOS_APP_ICON_B64: ${{ secrets.WEBOS_APP_ICON_B64 }}
         run: |
+          npm install --no-save sharp
           node -e '
             const fs = require("fs");
-            const b64 = process.env.WEBOS_APP_ICON_B64;
-            if (!b64) {
-              console.log("WEBOS_APP_ICON_B64 not set — keeping the placeholder src/icon.png.");
-              process.exit(0);
-            }
+            const sharp = require("sharp");
 
-            const buf = Buffer.from(b64, "base64");
+            (async () => {
+              const buf = Buffer.from(process.env.WEBOS_APP_ICON_B64, "base64");
 
-            const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-            if (buf.length < 24 || !buf.subarray(0, 8).equals(PNG_SIG)) {
-              console.error("WEBOS_APP_ICON_B64 does not decode to a valid PNG file.");
+              const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+              if (buf.length < 24 || !buf.subarray(0, 8).equals(PNG_SIG)) {
+                throw new Error("WEBOS_APP_ICON_B64 does not decode to a valid PNG file.");
+              }
+
+              // IHDR is always the first chunk: 8-byte PNG signature,
+              // then a 4-byte length + 4-byte "IHDR" type, then width
+              // and height as two big-endian uint32s.
+              const width = buf.readUInt32BE(16);
+              const height = buf.readUInt32BE(20);
+              if (width !== 130 || height !== 130) {
+                throw new Error(
+                  `WEBOS_APP_ICON_B64 must be exactly 130x130 (the webOS largeIcon size, and the source the 80x80 icon is generated from) — got ${width}x${height}.`
+                );
+              }
+
+              fs.writeFileSync("src/largeIcon.png", buf);
+              console.log(`Wrote src/largeIcon.png from WEBOS_APP_ICON_B64 (${buf.length} bytes, 130x130).`);
+
+              const small = await sharp(buf).resize(80, 80, { kernel: "lanczos3" }).png().toBuffer();
+              fs.writeFileSync("src/icon.png", small);
+              console.log(`Wrote src/icon.png (${small.length} bytes, 80x80, downscaled from the largeIcon secret).`);
+            })().catch((err) => {
+              console.error(err.message || err);
               process.exit(1);
-            }
-
-            // IHDR is always the first chunk: 8-byte PNG signature,
-            // then a 4-byte length + 4-byte "IHDR" type, then width
-            // and height as two big-endian uint32s.
-            const width = buf.readUInt32BE(16);
-            const height = buf.readUInt32BE(20);
-            if (width !== 80 || height !== 80) {
-              console.error(
-                `Icon must be exactly 80x80 (appinfo.json points both "icon" and "largeIcon" at this file) — got ${width}x${height}.`
-              );
-              process.exit(1);
-            }
-
-            fs.writeFileSync("src/icon.png", buf);
-            console.log(`Wrote src/icon.png from WEBOS_APP_ICON_B64 (${buf.length} bytes, ${width}x${height}).`);
+            });
           '
 
       - name: Package ipk

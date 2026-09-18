@@ -32,7 +32,8 @@ webos-photos-slideshow/
 ├── .gitignore                ← ignores *secret* (see src/secrets.local.js below)
 ├── src/                       ← everything ares-package hands to webOS — nothing else
 │   ├── appinfo.json            ← webOS app manifest
-│   ├── icon.png                 ← 80x80 app icon (placeholder — swap for your own)
+│   ├── icon.png                 ← 80x80 app icon (placeholder — generated from largeIcon.png if WEBOS_APP_ICON_B64 is set, see README)
+│   ├── largeIcon.png             ← 130x130 app icon (placeholder — swap for your own, or set WEBOS_APP_ICON_B64)
 │   ├── index.html                ← markup for pairing screen + slideshow
 │   ├── style.css                  ← dark-mode lean-back styling, crossfade CSS
 │   ├── app.js                      ← Supabase/KV pairing client, wa/hashes fetching, slideshow engine
@@ -335,20 +336,21 @@ references them anymore.
 
 ### d) App icon (optional)
 
-- `WEBOS_APP_ICON_B64` — a PNG, base64-encoded. If set, the workflow
-  overwrites `src/icon.png` with it right before packaging (same
-  placeholder-swap pattern as section c above). If unset, the step is
-  skipped and the committed placeholder icon ships as-is — this secret
-  is entirely optional.
+- `WEBOS_APP_ICON_B64` — a PNG, base64-encoded, **exactly 130x130**
+  (webOS's `largeIcon` size). If set, the workflow writes it to
+  `src/largeIcon.png` as-is, and generates `src/icon.png` (the 80x80
+  `icon`) by downscaling that same source with `sharp` — one image in,
+  both files out, so there's never a chance of the two icons drifting
+  out of sync with each other. If unset, the step is skipped entirely
+  and the committed placeholders ship as-is — this secret is optional.
 
-Must be **exactly 80x80** — `appinfo.json` points both `"icon"` and
-`"largeIcon"` at this one file (see the repo layout comment above), and
-the workflow checks the actual PNG dimensions and fails the build
-loudly if they don't match, rather than letting `ares-package` produce
-a working-but-wrong-icon `.ipk`. Generate the secret with:
+The workflow checks the actual PNG dimensions of the secret and fails
+the build loudly if they're not 130x130, rather than letting
+`ares-package` produce a working-but-wrong-icon `.ipk`. Generate the
+secret with:
 
 ```bash
-base64 -w0 your-icon.png | pbcopy   # macOS; use `xclip -selection clipboard` on Linux, or drop -w0 and paste manually on Windows
+base64 -w0 your-130x130-icon.png | pbcopy   # macOS; use `xclip -selection clipboard` on Linux, or drop -w0 and paste manually on Windows
 ```
 
 then paste the result as the secret's value.
@@ -379,13 +381,16 @@ diverged from a "textbook" version in a few deliberate ways:
   registered correctly.
 - **`--no-minify`** on `ares-package` (see section 4 above).
 - **App icon injection is optional and validated, not just copied** —
-  `WEBOS_APP_ICON_B64` (base64 PNG) is decoded and checked for a valid
-  PNG signature and exact 80x80 dimensions *before* being written to
-  `src/icon.png`, so a bad secret fails the build with a clear message
-  instead of producing an `.ipk` `ares-package` accepts but webOS
-  might reject or mis-render. Unset entirely is a valid, supported
-  state (keeps the placeholder) — this isn't a required secret like
-  the ones in section c.
+  `WEBOS_APP_ICON_B64` (base64 PNG, 130x130) is decoded and checked
+  for a valid PNG signature and exact dimensions *before* being
+  written to `src/largeIcon.png`; `src/icon.png` (80x80) is then
+  generated from that same buffer via `sharp` rather than needing a
+  second secret, so there's exactly one source image and no way for
+  the two files to disagree. A bad secret fails the build with a
+  clear message instead of producing an `.ipk` `ares-package` accepts
+  but webOS might reject or mis-render. Unset entirely is a valid,
+  supported state (keeps the placeholders) — this isn't a required
+  secret like the ones in section c.
 - **The relaunch step is commented out** — `ares-install` already
   restarts a running app on install for this project's testing
   workflow; uncomment `ares-launch` if your TV doesn't do this
