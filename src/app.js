@@ -19,9 +19,10 @@
  *      one big upfront list, but they aren't fetched strictly
  *      one-at-a-time either: a small forward queue
  *      (CONFIG.PREFETCH_DEPTH) keeps a few upcoming photos already
- *      fetched AND image-preloaded, so skipping ahead doesn't wait on
- *      a fresh round trip. A separate in-memory history buffer makes
- *      manual Left (previous) possible on top of that.
+ *      fetched, image-preloaded, AND reverse-geocoded (coords -> place
+ *      name, via Nominatim), so skipping ahead doesn't wait on a fresh
+ *      round trip. A separate in-memory history buffer makes manual
+ *      Left (previous) possible on top of that.
  *
  * CONFIG VALUES: loaded from window.APP_CONFIG if present (see
  * secrets.local.js.example — copy it to secrets.local.js, gitignored,
@@ -280,13 +281,105 @@ function parseMapsCoords(raw) {
   return { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
 }
 
-/** Prefers the human place name; falls back to raw coordinates; empty
- *  string (not shown) if neither field has anything usable. */
+/**
+ * Reverse geocoding (coords -> place name) via Nominatim's free public
+ * API (OpenStreetMap data, no API key, CORS-enabled — confirmed
+ * against their own usage docs rather than assumed). Two things their
+ * usage policy asks for that matter here:
+ *   - Max ~1 request/second. `geocodeChain` serializes every call
+ *     (even concurrent ones from prefetching several photos in a row)
+ *     through one queue, each waiting out GEOCODE_MIN_INTERVAL_MS
+ *     since the last actual request — not per-caller, app-wide.
+ *   - Identify the application. Browsers block scripts from setting a
+ *     custom User-Agent header (it's on the fetch spec's forbidden
+ *     header list), so this relies on the Referer header the browser
+ *     sends automatically instead, which does identify this app's own
+ *     domain — the commonly-accepted workaround for browser-side
+ *     Nominatim usage.
+ * `geocodeCache` is keyed to ~100m buckets (3 decimal places) since
+ * many photos taken near each other resolve to the same place name —
+ * this avoids a repeat request every time, not just within one prefetch
+ * batch but for the lifetime of the app.
+ */
+const geocodeCache = new Map(); // "lat,lng" (3dp) -> place name string | null
+const GEOCODE_MIN_INTERVAL_MS = 1100;
+let lastGeocodeAt = 0;
+let geocodeChain = Promise.resolve();
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractPlaceName(nominatimJson) {
+  const address = nominatimJson && nominatimJson.address;
+  if (!address) return null;
+  const locality = address.city || address.town || address.village || address.municipality || address.suburb || address.county;
+  const country = address.country;
+  if (locality && country) return `${locality}, ${country}`;
+  return locality || country || null;
+}
+
+function reverseGeocode(coords) {
+  const key = `${coords.lat.toFixed(3)},${coords.lng.toFixed(3)}`;
+  if (geocodeCache.has(key)) return Promise.resolve(geocodeCache.get(key));
+
+  const run = async () => {
+    const wait = GEOCODE_MIN_INTERVAL_MS - (Date.now() - lastGeocodeAt);
+    if (wait > 0) await sleep(wait);
+    lastGeocodeAt = Date.now();
+
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${coords.lat}&lon=${coords.lng}&zoom=10&addressdetails=1`
+      );
+      if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
+      const place = extractPlaceName(await res.json());
+      geocodeCache.set(key, place);
+      return place;
+    } catch (err) {
+      console.error("Reverse geocoding failed:", err);
+      geocodeCache.set(key, null); // don't re-hit the same failing coords on every prefetch
+      return null;
+    }
+  };
+
+  // Chained (not Promise.all'd) so overlapping prefetches still hit
+  // Nominatim one at a time, in order, regardless of how many photos
+  // are being prefetched concurrently.
+  const task = geocodeChain.then(run, run);
+  geocodeChain = task.catch(() => {});
+  return task;
+}
+
+/**
+ * Combines the human-entered location_name (if present and not
+ * Google Photos' "Add a location" placeholder) with a place name
+ * reverse-geocoded from the raw coordinates — shown together rather
+ * than one as a fallback for the other, since they're often different
+ * levels of detail (Google Photos' own "Holon" vs. a fuller "Holon,
+ * Israel" from the coordinates). `meta.geocodedPlace` is attached
+ * during prefetch (see fetchAndPreloadOne) so this itself stays
+ * synchronous — formatLocation is called from the render path, which
+ * shouldn't be blocked on a network request.
+ */
 function formatLocation(meta) {
   const name = parseLocationName(meta.location_name);
-  if (name) return name;
+  const geocoded = meta.geocodedPlace;
+
+  const parts = [];
+  if (name) parts.push(name);
+  // Skip the geocoded part if it's just a more verbose restatement of
+  // the same place (e.g. name "Holon", geocoded "Holon, Israel").
+  if (geocoded && !(name && geocoded.toLowerCase().startsWith(name.toLowerCase()))) {
+    parts.push(geocoded);
+  }
+  if (parts.length > 0) return parts.join(" · ");
+
+  // Geocoding hasn't resolved (still in flight, or failed) and there's
+  // no location_name either — last-resort raw coordinates.
   const coords = parseMapsCoords(meta.location);
   if (coords) return `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`;
+
   return "";
 }
 
@@ -337,11 +430,20 @@ function preloadImage(url) {
   });
 }
 
-/** Fetches one random photo's metadata and preloads its image before
- *  resolving, so it's cache-ready by the time it's actually shown. */
+/** Fetches one random photo's metadata, preloads its image, and
+ *  reverse-geocodes its coordinates (if any) — all before resolving,
+ *  so everything renderPhoto/formatLocation need is already on `meta`
+ *  by the time this photo is actually shown. Image preload and
+ *  geocoding are independent network calls to different services, so
+ *  they run concurrently rather than one after another. */
 async function fetchAndPreloadOne() {
   const meta = await fetchRandomPhoto();
-  await preloadImage(photoImageUrl(meta));
+  const coords = parseMapsCoords(meta.location);
+  const [, geocodedPlace] = await Promise.all([
+    preloadImage(photoImageUrl(meta)),
+    coords ? reverseGeocode(coords) : Promise.resolve(null),
+  ]);
+  meta.geocodedPlace = geocodedPlace;
   return meta;
 }
 
