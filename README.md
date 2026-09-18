@@ -32,8 +32,9 @@ webos-photos-slideshow/
 ├── .gitignore                ← ignores *secret* (see src/secrets.local.js below)
 ├── src/                       ← everything ares-package hands to webOS — nothing else
 │   ├── appinfo.json            ← webOS app manifest
-│   ├── icon.png                 ← 80x80 app icon (placeholder — generated from largeIcon.png if WEBOS_APP_ICON_B64 is set, see README)
-│   ├── largeIcon.png             ← 130x130 app icon (placeholder — swap for your own, or set WEBOS_APP_ICON_B64)
+│   ├── icon.png                 ← 80x80 app icon, generic placeholder (auto-generated from a real icon at build time if you've set up section d)
+│   ├── largeIcon.png             ← 130x130 app icon, generic placeholder — keep this as the placeholder, don't commit your real photo here (see README d)
+│   ├── largeIcon.png.gpg         ← (you add this) your real icon, GPG-encrypted — see README section (d)
 │   ├── index.html                ← markup for pairing screen + slideshow
 │   ├── style.css                  ← dark-mode lean-back styling, crossfade CSS
 │   ├── app.js                      ← Supabase/KV pairing client, wa/hashes fetching, slideshow engine
@@ -334,26 +335,51 @@ If you're migrating an existing deployment, **remove** the old
 `PAIRING_BACKEND_URL` / `PAIRING_SHARED_SECRET` repo secrets — nothing
 references them anymore.
 
-### d) App icon (optional)
+### d) App icon — keeping it private
 
-- `WEBOS_APP_ICON_B64` — a PNG, base64-encoded, **exactly 130x130**
-  (webOS's `largeIcon` size). If set, the workflow writes it to
-  `src/largeIcon.png` as-is, and generates `src/icon.png` (the 80x80
-  `icon`) by downscaling that same source with `sharp` — one image in,
-  both files out, so there's never a chance of the two icons drifting
-  out of sync with each other. If unset, the step is skipped entirely
-  and the committed placeholders ship as-is — this secret is optional.
+If your icon is a personal photo (not something you want sitting in
+the repo in the clear, especially in a public repo), don't commit it
+as plaintext and don't try to base64-encode it into a repo secret
+either — GitHub Actions secrets are hard-capped at **48 KB**, which a
+130x130 PNG can exceed depending on export settings, and a secret
+isn't really the right place for something actually sensitive anyway
+(it'd still be sitting in GitHub's systems as your literal photo).
 
-The workflow checks the actual PNG dimensions of the secret and fails
-the build loudly if they're not 130x130, rather than letting
-`ares-package` produce a working-but-wrong-icon `.ipk`. Generate the
-secret with:
+Instead, this uses GitHub's own documented pattern for exactly this
+case: encrypt the file locally, commit the *encrypted* blob (safe even
+in a public repo — unreadable without the passphrase), and keep only
+the small passphrase as the Actions secret.
+
+One-time setup, on your own machine:
 
 ```bash
-base64 -w0 your-130x130-icon.png | pbcopy   # macOS; use `xclip -selection clipboard` on Linux, or drop -w0 and paste manually on Windows
+# Your real icon, exactly 130x130 (webOS's largeIcon size) — pick
+# whatever passphrase you want when prompted, and don't lose it.
+gpg --symmetric --cipher-algo AES256 \
+  --output src/largeIcon.png.gpg src/largeIcon.png
+
+git add src/largeIcon.png.gpg
+git commit -m "Add encrypted icon"
+git push
 ```
 
-then paste the result as the secret's value.
+Then set the passphrase you were prompted for as the
+`ICON_DECRYPT_PASSPHRASE` repo secret (Settings → Secrets and
+variables → Actions). **Never commit the plaintext `src/largeIcon.png`
+once you've done this** — `git status` after running the command above
+should show only `largeIcon.png.gpg` as new/changed; leave the
+plaintext file untracked or restore the placeholder
+(`git checkout -- src/largeIcon.png`) before pushing.
+
+At deploy time, the workflow decrypts `src/largeIcon.png.gpg` back to
+`src/largeIcon.png` inside the CI runner only (never written back to
+the repo), validates it's a real 130x130 PNG, and generates
+`src/icon.png` (80x80) from it via a Lanczos-resampled downscale — a
+wrong passphrase or a corrupted/stale `.gpg` file fails the build
+loudly rather than silently shipping garbage. If `src/largeIcon.png.gpg`
+isn't in the repo, or `ICON_DECRYPT_PASSPHRASE` isn't set, this step
+is skipped and the committed generic placeholder ships instead — this
+is entirely optional.
 
 ### Changes made to the default workflow, for future reference
 
@@ -380,17 +406,20 @@ diverged from a "textbook" version in a few deliberate ways:
   install step and you need to confirm the device profile actually
   registered correctly.
 - **`--no-minify`** on `ares-package` (see section 4 above).
-- **App icon injection is optional and validated, not just copied** —
-  `WEBOS_APP_ICON_B64` (base64 PNG, 130x130) is decoded and checked
-  for a valid PNG signature and exact dimensions *before* being
-  written to `src/largeIcon.png`; `src/icon.png` (80x80) is then
-  generated from that same buffer via `sharp` rather than needing a
-  second secret, so there's exactly one source image and no way for
-  the two files to disagree. A bad secret fails the build with a
-  clear message instead of producing an `.ipk` `ares-package` accepts
-  but webOS might reject or mis-render. Unset entirely is a valid,
-  supported state (keeps the placeholders) — this isn't a required
-  secret like the ones in section c.
+- **`icon.png` is decrypted-and-generated at build time, not committed
+  as final** — the real icon is a personal photo, so it's committed
+  only as a GPG-encrypted blob (`src/largeIcon.png.gpg`), with just
+  the decryption passphrase as a small Actions secret
+  (`ICON_DECRYPT_PASSPHRASE`) — see README section (d) for why (48 KB
+  secret cap, plus a real photo doesn't belong in a secret's cleartext
+  value either). The workflow decrypts it into `src/largeIcon.png`
+  inside the runner only, validates it (PNG signature + exact 130x130
+  dimensions), then downscales it with `sharp` to produce `src/icon.png`
+  (80x80). A wrong passphrase or malformed/wrong-size decrypted file
+  fails the build with a clear message instead of producing an `.ipk`
+  `ares-package` accepts but webOS might reject or mis-render. Missing
+  secret or missing `.gpg` file is a valid, supported state (keeps the
+  placeholder) — this isn't required like the secrets in section c.
 - **The relaunch step is commented out** — `ares-install` already
   restarts a running app on install for this project's testing
   workflow; uncomment `ares-launch` if your TV doesn't do this

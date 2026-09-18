@@ -14,6 +14,7 @@ on:
       - "src/appinfo.json"
       - "src/icon.png"
       - "src/largeIcon.png"
+      - "src/largeIcon.png.gpg"
   workflow_dispatch: {}
 
 jobs:
@@ -114,34 +115,59 @@ jobs:
           mv src/appinfo.json.tmp src/appinfo.json
 
       # ----------------------------------------------------------------
-      # Optional: overwrite the placeholder src/icon.png / src/largeIcon.png
-      # with real ones from a repo secret, right before packaging — same
-      # idea as the config injection above, so the repo itself only ever
-      # commits placeholders. Skipped entirely (not a failure) if the
-      # secret isn't set. WEBOS_APP_ICON_B64 holds the 130x130 largeIcon
-      # only — the 80x80 icon is generated from it here (via sharp) rather
-      # than needing a second secret, so there's exactly one source image
-      # to keep in sync. Both are validated strictly: appinfo.json points
-      # "icon"/"largeIcon" at these exact files, and a malformed/wrong-size
-      # source image fails at ares-package time with a much less obvious
-      # error than failing here does.
+      # Optional: decrypt a real (personal) icon out of a GPG-encrypted
+      # blob committed to the repo, then regenerate src/icon.png from
+      # it — right before packaging. If skipped, the committed
+      # placeholder src/largeIcon.png / src/icon.png ship as-is.
+      #
+      # This exists instead of a plain WEBOS_APP_ICON_B64 secret
+      # because the real icon here is a personal photo — it doesn't
+      # belong in the repo in the clear, and a base64 GitHub Actions
+      # secret is both hard-capped at 48 KB (a 130x130 PNG can exceed
+      # that) AND still the wrong place for something that's actually
+      # sensitive rather than merely inconvenient to store elsewhere.
+      # This is GitHub's own documented pattern for secrets bigger than
+      # that cap: encrypt the file locally, commit the *encrypted* blob
+      # (safe even in a public repo — unreadable without the
+      # passphrase), and keep only the small passphrase as an Actions
+      # secret.
+      #
+      # One-time setup, on your own machine (not in CI):
+      #   gpg --symmetric --cipher-algo AES256 \
+      #     --output src/largeIcon.png.gpg src/largeIcon.png
+      #   # then: git add src/largeIcon.png.gpg && git commit && git push
+      #   # and set the passphrase you were prompted for as the
+      #   # ICON_DECRYPT_PASSPHRASE repo secret (Settings > Secrets and
+      #   # variables > Actions). Never commit the plaintext
+      #   # src/largeIcon.png itself once you've done this — see
+      #   # README section (d).
       # ----------------------------------------------------------------
-      - name: Inject app icons
-        if: ${{ secrets.WEBOS_APP_ICON_B64 != '' }}
+      - name: Decrypt icon and generate icon.png
+        if: ${{ secrets.ICON_DECRYPT_PASSPHRASE != '' }}
         env:
-          WEBOS_APP_ICON_B64: ${{ secrets.WEBOS_APP_ICON_B64 }}
+          ICON_DECRYPT_PASSPHRASE: ${{ secrets.ICON_DECRYPT_PASSPHRASE }}
         run: |
+          if [ ! -f src/largeIcon.png.gpg ]; then
+            echo "ICON_DECRYPT_PASSPHRASE is set but src/largeIcon.png.gpg is missing from the repo — see README section (d). Keeping the placeholder icon."
+            exit 0
+          fi
+
+          gpg --quiet --batch --yes --decrypt \
+            --passphrase="$ICON_DECRYPT_PASSPHRASE" \
+            --output src/largeIcon.png \
+            src/largeIcon.png.gpg
+
           npm install --no-save sharp
           node -e '
             const fs = require("fs");
             const sharp = require("sharp");
 
             (async () => {
-              const buf = Buffer.from(process.env.WEBOS_APP_ICON_B64, "base64");
+              const buf = fs.readFileSync("src/largeIcon.png");
 
               const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
               if (buf.length < 24 || !buf.subarray(0, 8).equals(PNG_SIG)) {
-                throw new Error("WEBOS_APP_ICON_B64 does not decode to a valid PNG file.");
+                throw new Error("Decrypted src/largeIcon.png is not a valid PNG — wrong ICON_DECRYPT_PASSPHRASE, or largeIcon.png.gpg is stale?");
               }
 
               // IHDR is always the first chunk: 8-byte PNG signature,
@@ -151,16 +177,13 @@ jobs:
               const height = buf.readUInt32BE(20);
               if (width !== 130 || height !== 130) {
                 throw new Error(
-                  `WEBOS_APP_ICON_B64 must be exactly 130x130 (the webOS largeIcon size, and the source the 80x80 icon is generated from) — got ${width}x${height}.`
+                  `Decrypted icon must be exactly 130x130 (the webOS largeIcon size, and the source the 80x80 icon is generated from) — got ${width}x${height}.`
                 );
               }
 
-              fs.writeFileSync("src/largeIcon.png", buf);
-              console.log(`Wrote src/largeIcon.png from WEBOS_APP_ICON_B64 (${buf.length} bytes, 130x130).`);
-
               const small = await sharp(buf).resize(80, 80, { kernel: "lanczos3" }).png().toBuffer();
               fs.writeFileSync("src/icon.png", small);
-              console.log(`Wrote src/icon.png (${small.length} bytes, 80x80, downscaled from the largeIcon secret).`);
+              console.log(`Wrote src/icon.png (${small.length} bytes, 80x80, downscaled from the decrypted largeIcon.png).`);
             })().catch((err) => {
               console.error(err.message || err);
               process.exit(1);
