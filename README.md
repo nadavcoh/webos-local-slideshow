@@ -372,6 +372,21 @@ diverged from a "textbook" version in a few deliberate ways:
 - **History buffer size** (`CONFIG.HISTORY_MAX`, currently 50) controls
   how far back manual Left-arrow "previous" navigation can go before
   hitting the start of what's been shown this session.
+- **Prefetch depth** (`CONFIG.PREFETCH_DEPTH`, currently 3) controls how
+  many upcoming photos are kept already fetched + image-preloaded +
+  reverse-geocoded ahead of time, so skipping forward doesn't wait on a
+  fresh round trip. Raise it if you tend to skip faster than 3 photos'
+  worth of prefetching can keep up with; each unit costs one extra
+  Supabase query, one extra image load, and (if the photo has
+  coordinates) one extra Nominatim lookup done in advance.
+- **Reverse geocoding** (coords → place name) uses Nominatim's free
+  public API — no API key needed, but it's meant for light,
+  non-bulk use. Requests are already throttled app-wide to roughly one
+  per second and cached by coordinate, so normal use (one TV, one
+  photo every 15s) stays well within their usage policy without any
+  extra configuration. If this ever gets reused somewhere with much
+  higher request volume, that throttling assumption should be
+  revisited.
 - **Pairing timeout**: `CONFIG.PAIRING_POLL_TIMEOUT_MS` (10 minutes) —
   how long the TV waits overall for the phone to finish sign-in. This
   is separate from the KV handoff record's own 5-minute TTL (in

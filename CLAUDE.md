@@ -27,7 +27,11 @@ current architecture:
   joined against a `hashes` table (`wa.id_hash -> hashes.id`) for
   filename, location, location_name, and timestamp. Same underlying
   database/schema as the `photo-match-next` project — both are fed by
-  a separate `phash` ingest repo, not by anything in this repo.
+  a separate `phash` ingest repo, not by anything in this repo. A
+  small forward queue (`CONFIG.PREFETCH_DEPTH`) keeps a few upcoming
+  photos already fetched, image-preloaded, and reverse-geocoded
+  (coords → place name, via Nominatim) ahead of time, so skipping
+  doesn't wait on a fresh round trip.
 - **Photo bytes**: a plain, unauthenticated HTTP server on a machine
   in the home LAN, serving files by filename. Not Supabase Storage,
   not Backblaze — just a local static file server.
@@ -92,11 +96,17 @@ While the slideshow is playing:
   reset the 15s auto-advance clock (`goToPrevSlide`/`goToNextSlide` →
   `restartSlideTimer`). Unlike the old `mediaItems` array (a fixed,
   pre-fetched list with a `displayedIndex`), photos are now fetched
-  one at a time from Supabase on demand — there's no fixed list to
-  index into. A small in-memory `history` buffer (last
-  `CONFIG.HISTORY_MAX`, currently 50) is what makes "previous" work at
-  all: Right past the end of the buffer fetches a fresh random photo;
-  Left walks backward through what's already been shown.
+  from Supabase rather than indexed from one static list — but not
+  strictly one-at-a-time on demand either. Two buffers cover the two
+  directions:
+  - `history` (last `CONFIG.HISTORY_MAX`, currently 50) — photos
+    already shown this session; Left walks backward through it.
+  - `upcoming` (`CONFIG.PREFETCH_DEPTH`, currently 3) — photos not yet
+    shown, but already fetched, image-preloaded, and reverse-geocoded
+    ahead of time (`topUpQueue()`/`fetchAndPreloadOne()`); Right past
+    the end of `history` pulls from here first, only falling back to
+    an inline fetch if this is empty. This is what makes skipping feel
+    instant instead of waiting on a fresh round trip each time.
 - **Any other button** opens a small on-screen menu (OK activates via
   native browser behavior, auto-hides after 8s):
   - **Log Out** — clears the Supabase session (`auth.signOut()`) and
@@ -190,6 +200,26 @@ structured even though the specific APIs are gone:
   trip, that's a Postgres RPC function, not a query-builder trick —
   matches the RPC pattern `photo-match-next` already uses for its own
   distance queries.
+- **`hashes.location_name` has a literal `"Add a location"` placeholder**
+  Google Photos shows when nothing's tagged — `parseLocationName()`
+  treats that string as empty rather than displaying it. If a similar
+  placeholder ever shows up in a different casing/wording, extend that
+  same check rather than adding a second one elsewhere.
+- **Reverse geocoding must not block rendering.** `formatLocation()` is
+  synchronous on purpose — the actual Nominatim network call
+  (`reverseGeocode()`) only ever happens inside `fetchAndPreloadOne()`,
+  during prefetch, so `meta.geocodedPlace` is already populated by the
+  time a photo is shown. Don't call `reverseGeocode()` directly from
+  `renderPhoto()`/`formatLocation()` even for a "quick fix" — that
+  would reintroduce exactly the latency the prefetch queue exists to
+  avoid.
+- **Nominatim throttling is app-wide, not per-caller** — `geocodeChain`
+  serializes every `reverseGeocode()` call through one queue regardless
+  of how many photos are being prefetched concurrently. If a second,
+  independent geocoding call site is ever added elsewhere in the app,
+  route it through the same `reverseGeocode()`/`geocodeChain`, not a
+  separate throttle — two independent throttles could each think
+  they're within the ~1/sec budget while jointly exceeding it.
 
 ## History: the Google Photos era (retired, kept for context)
 
