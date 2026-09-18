@@ -333,6 +333,26 @@ If you're migrating an existing deployment, **remove** the old
 `PAIRING_BACKEND_URL` / `PAIRING_SHARED_SECRET` repo secrets — nothing
 references them anymore.
 
+### d) App icon (optional)
+
+- `WEBOS_APP_ICON_B64` — a PNG, base64-encoded. If set, the workflow
+  overwrites `src/icon.png` with it right before packaging (same
+  placeholder-swap pattern as section c above). If unset, the step is
+  skipped and the committed placeholder icon ships as-is — this secret
+  is entirely optional.
+
+Must be **exactly 80x80** — `appinfo.json` points both `"icon"` and
+`"largeIcon"` at this one file (see the repo layout comment above), and
+the workflow checks the actual PNG dimensions and fails the build
+loudly if they don't match, rather than letting `ares-package` produce
+a working-but-wrong-icon `.ipk`. Generate the secret with:
+
+```bash
+base64 -w0 your-icon.png | pbcopy   # macOS; use `xclip -selection clipboard` on Linux, or drop -w0 and paste manually on Windows
+```
+
+then paste the result as the secret's value.
+
 ### Changes made to the default workflow, for future reference
 
 If you're picking this project back up after a while, the workflow has
@@ -358,6 +378,14 @@ diverged from a "textbook" version in a few deliberate ways:
   install step and you need to confirm the device profile actually
   registered correctly.
 - **`--no-minify`** on `ares-package` (see section 4 above).
+- **App icon injection is optional and validated, not just copied** —
+  `WEBOS_APP_ICON_B64` (base64 PNG) is decoded and checked for a valid
+  PNG signature and exact 80x80 dimensions *before* being written to
+  `src/icon.png`, so a bad secret fails the build with a clear message
+  instead of producing an `.ipk` `ares-package` accepts but webOS
+  might reject or mis-render. Unset entirely is a valid, supported
+  state (keeps the placeholder) — this isn't a required secret like
+  the ones in section c.
 - **The relaunch step is commented out** — `ares-install` already
   restarts a running app on install for this project's testing
   workflow; uncomment `ares-launch` if your TV doesn't do this
