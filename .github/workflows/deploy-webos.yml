@@ -20,6 +20,14 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Secrets can't be referenced directly in `if:` conditions (GitHub
+    # Actions rejects it at parse time — only the `env` context is
+    # allowed there). Mirroring it into a job-level env var here is
+    # the documented workaround, and it doubles as the value every
+    # step's shell sees for $ICON_DECRYPT_PASSPHRASE, so the "Decrypt
+    # icon" step below no longer needs its own step-level `env:` for it.
+    env:
+      ICON_DECRYPT_PASSPHRASE: ${{ secrets.ICON_DECRYPT_PASSPHRASE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -143,9 +151,7 @@ jobs:
       #   # README section (d).
       # ----------------------------------------------------------------
       - name: Decrypt icon and generate icon.png
-        if: ${{ secrets.ICON_DECRYPT_PASSPHRASE != '' }}
-        env:
-          ICON_DECRYPT_PASSPHRASE: ${{ secrets.ICON_DECRYPT_PASSPHRASE }}
+        if: ${{ env.ICON_DECRYPT_PASSPHRASE != '' }}
         run: |
           if [ ! -f src/largeIcon.png.gpg ]; then
             echo "ICON_DECRYPT_PASSPHRASE is set but src/largeIcon.png.gpg is missing from the repo — see README section (d). Keeping the placeholder icon."
