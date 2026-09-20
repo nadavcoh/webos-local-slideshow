@@ -19,22 +19,40 @@
  * a native browser op, not JS-level pixel work, so it's cheap
  * relative to the decode itself.
  *
- * If this worker fails to start at all (e.g. some webOS builds
- * restrict Worker creation from a file:// origin — this app is
- * installed and runs from file:///.../applications/<app-id>/ on a
- * real TV, unlike desktop-Chrome testing via `npx serve .`), app.js
- * falls back to running this same decode on the main thread instead.
- * See getHeicWorker()/decodeHeicOnMainThread() there.
+ * If this worker fails to start at all (untested in the abstract, but
+ * confirmed NOT to be the issue on the real TV as of the fix in this
+ * file — `new Worker(...)` and `importScripts()` both work fine from
+ * the file:// origin this app actually runs from once installed),
+ * app.js falls back to running this same decode on the main thread
+ * instead. See getHeicWorker()/decodeHeicOnMainThread() there.
  * ============================================================ */
 
 importScripts("vendor/libheif/libheif-bundle.js");
 
-// eslint-disable-next-line no-undef
-const decoder = new libheif.HeifDecoder();
+// `libheif` (just loaded above) is a *factory function*, not an
+// already-initialized module — calling it kicks off async WASM
+// instantiation and returns a Promise that resolves to the real
+// module (the one with .HeifDecoder on it). Calling `new
+// libheif.HeifDecoder()` directly, without awaiting the factory
+// first, throws "libheif.HeifDecoder is not a constructor" — that
+// was the actual bug the first version of this file had, not a
+// device/Worker limitation. Cache the promise so repeated decodes
+// reuse the same initialized module instead of re-instantiating the
+// WASM runtime on every photo.
+let libheifModulePromise = null;
+function getLibheifModule() {
+  if (!libheifModulePromise) {
+    // eslint-disable-next-line no-undef
+    libheifModulePromise = libheif();
+  }
+  return libheifModulePromise;
+}
 
-self.onmessage = (e) => {
+self.onmessage = async (e) => {
   const { id, bytes } = e.data;
   try {
+    const heif = await getLibheifModule();
+    const decoder = new heif.HeifDecoder();
     const images = decoder.decode(new Uint8Array(bytes));
     const image = images && images[0];
     if (!image) throw new Error("No image found in HEIC data.");

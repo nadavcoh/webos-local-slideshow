@@ -483,27 +483,43 @@ function decodeHeicViaWorker(worker, arrayBuffer) {
   }).then(rgbaToJpegBlob);
 }
 
-/** Same decode, run synchronously on the main thread — the fallback
- *  path when the Worker itself couldn't start (see getHeicWorker).
- *  window.libheif here comes from the same vendored bundle loaded via
- *  <script> in index.html. */
-function decodeHeicOnMainThread(arrayBuffer) {
-  // eslint-disable-next-line no-undef
-  const decoder = new libheif.HeifDecoder();
+/** Same decode, run on the main thread — the fallback path when the
+ *  Worker itself couldn't start (see getHeicWorker). window.libheif
+ *  here comes from the same vendored bundle loaded via <script> in
+ *  index.html, and — same caveat as heic-worker.js — is a factory
+ *  function that must be called and awaited to get the actual
+ *  initialized module, not an already-ready object. Cached the same
+ *  way, but as a separate promise: this runs in a different JS
+ *  context (main thread vs. Worker) than heic-worker.js's own copy,
+ *  so the two can't share state even though they load the identical
+ *  vendored file. */
+let mainThreadLibheifModulePromise = null;
+function getMainThreadLibheifModule() {
+  if (!mainThreadLibheifModulePromise) {
+    // eslint-disable-next-line no-undef
+    mainThreadLibheifModulePromise = libheif();
+  }
+  return mainThreadLibheifModulePromise;
+}
+
+async function decodeHeicOnMainThread(arrayBuffer) {
+  const heif = await getMainThreadLibheifModule();
+  const decoder = new heif.HeifDecoder();
   const images = decoder.decode(new Uint8Array(arrayBuffer));
   const image = images && images[0];
-  if (!image) return Promise.reject(new Error("No image found in HEIC data."));
+  if (!image) throw new Error("No image found in HEIC data.");
 
   const width = image.get_width();
   const height = image.get_height();
   const rgba = new Uint8ClampedArray(width * height * 4);
 
-  return new Promise((resolve, reject) => {
+  const decoded = await new Promise((resolve, reject) => {
     image.display({ data: rgba, width, height }, (displayData) => {
       if (!displayData) reject(new Error("libheif image.display() failed."));
       else resolve({ width, height, buffer: rgba.buffer });
     });
-  }).then(rgbaToJpegBlob);
+  });
+  return rgbaToJpegBlob(decoded);
 }
 
 /** Shared final step for both decode paths above: paint raw RGBA
