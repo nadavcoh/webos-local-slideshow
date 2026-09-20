@@ -64,6 +64,13 @@ const CONFIG = {
   HISTORY_MAX: 50, // how many recently-shown photos Left/Right can browse back through
   PREFETCH_DEPTH: 3, // how many upcoming photos to have fetched + image-preloaded ahead of time
 
+  // Shows meta.filename as a small on-screen overlay (see renderPhoto)
+  // — handy for correlating what's on screen against ares-inspect /
+  // LAN-server logs while debugging (e.g. the HEIC decode work), but
+  // it's a raw filename, not really "ambient" content — flip to false
+  // once you're done troubleshooting and just want date + location.
+  SHOW_FILENAME_OVERLAY: true,
+
   // wa.filetype values considered "an image" — adjust here if the
   // actual stored values turn out to differ (see README.md note).
   IMAGE_FILETYPES: ["Image", "image/jpeg"],
@@ -107,6 +114,7 @@ const el = {
   layerB: document.getElementById("layer-b"),
   overlayDate: document.getElementById("overlay-date"),
   overlayLocation: document.getElementById("overlay-location"),
+  overlayFilename: document.getElementById("overlay-filename"),
 
   menuOverlay: document.getElementById("menu-overlay"),
   menuLogout: document.getElementById("menu-logout"),
@@ -699,6 +707,7 @@ async function renderPhoto(meta) {
   hiddenLayer.src = url;
   el.overlayDate.textContent = formatTimestamp(meta);
   el.overlayLocation.textContent = formatLocation(meta);
+  el.overlayFilename.textContent = CONFIG.SHOW_FILENAME_OVERLAY ? meta.filename : "";
 
   // Crossfade: fade the new layer in, fade the old one out, then swap roles.
   hiddenLayer.classList.add("visible");

@@ -196,6 +196,19 @@ html, body {
   display: none;
 }
 
+.overlay-filename {
+  font-family: monospace;
+  font-size: 0.75rem;
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.35);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+}
+
+.overlay-filename:empty {
+  display: none;
+}
+
 /* ---------------- Remote-control menu ---------------- */
 
 .menu-overlay {
