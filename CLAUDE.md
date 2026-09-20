@@ -9,7 +9,9 @@ summarizes *why* things are built the way they are — the README covers
 
 An ambient photo slideshow for an LG webOS 4K TV, pulling from a
 personal photo database rather than a live Google Photos album. Dark
-16:9 "lean-back" UI, 15s crossfades, timestamp + location overlay.
+16:9 "lean-back" UI, 15s crossfades, timestamp + location overlay
+(plus an optional filename overlay, on by default — see
+`CONFIG.SHOW_FILENAME_OVERLAY`, mainly useful while debugging).
 Deployed via a GitHub Action that packages the app and pushes it to
 the TV over Tailscale.
 
@@ -78,7 +80,9 @@ src/                    ← the actual webOS app (ares-package src)
   app.js                  Supabase/KV pairing client, wa/hashes fetching, slideshow
   heic-worker.js          off-main-thread HEIC->JPEG decode (see "HEIC photos" below)
   vendor/libheif/         vendored WASM build of libheif used by heic-worker.js + app.js
-  index.html, style.css, appinfo.json, icon.png
+  index.html, style.css, appinfo.json
+  icon.png, largeIcon.png        generic placeholders — see "App icon" below for the real one
+  largeIcon.png.gpg              (repo owner adds this) real icon, GPG-encrypted
   secrets.local.js.example  copy → secrets.local.js (gitignored) for local testing
 webapp/                 ← separate Next.js/Vercel deployment, NOT packaged into the TV app
   app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + email
@@ -151,19 +155,35 @@ for "has idle time to spare" than "wins a benchmark."
   main thread — the crossfade timer, remote-key handling, and the menu
   auto-hide timer all live there. `getHeicWorker()` in `app.js` starts
   it lazily on first use.
-- **Untested fallback**: if the Worker can't start at all — the app
-  runs from `file:///media/developer/apps/usr/palm/applications/<id>/`
-  once installed on a real TV, and some webOS/Chromium builds are
-  known to restrict Worker creation from a `file://` origin — the same
-  decode runs on the main thread instead (`decodeHeicOnMainThread()`),
-  briefly blocking but still correct. Same if the worker crashes
-  mid-session (`onerror`) — it's marked broken and every HEIC photo
-  after that falls back too, without retrying a dead worker each time.
-  Check `ares-inspect` logs the first time this runs on the real TV
-  for "Could not start HEIC worker" / "HEIC worker crashed" to know
-  which path it's actually taking; if it's always the fallback, the
-  Worker restriction guess above was right and there'd be no reason to
-  keep the Worker path around.
+- **Confirmed working on the real TV**: `new Worker(...)` and
+  `importScripts()` both succeed from the `file:///.../applications/<id>/`
+  origin this app actually runs from once installed — this was an open
+  question when the Worker was first added, resolved by the crash logs
+  from the bug below actually reaching the *inside* of the worker
+  (proving it started and ran) rather than failing to construct. The
+  main-thread fallback (`decodeHeicOnMainThread()`) still exists for
+  `getHeicWorker()`'s `try/catch` around `new Worker(...)` and for the
+  `onerror` case if a worker ever does crash mid-session, but there's
+  no longer a specific reason to expect either on this device.
+- **The actual bug hit (and the one to not reintroduce)**: `libheif`
+  (the global `vendor/libheif/libheif-bundle.js` exposes, in both the
+  worker via `importScripts()` and the main thread via the `<script>`
+  tag in `index.html`) is a **factory function**, not a ready module —
+  calling it kicks off async WASM instantiation and returns a Promise
+  that resolves to the real module (the one with `.HeifDecoder` on
+  it). Calling `new libheif.HeifDecoder()` directly throws
+  `"libheif.HeifDecoder is not a constructor"` — this happened for
+  real, in both `heic-worker.js` and `decodeHeicOnMainThread()`
+  simultaneously (same mistake, copy-pasted). Fixed by
+  `getLibheifModule()`/`getMainThreadLibheifModule()` — two separate
+  cached-promise wrappers (one per JS context; the worker and main
+  thread each load their own copy of the bundle and can't share
+  state) that `await libheif()` once and reuse the resolved module for
+  every subsequent decode. If HEIC decoding ever breaks again with
+  this exact error, this is almost certainly what regressed — check
+  that whatever calls `new heif.HeifDecoder()` is doing so on the
+  *awaited* result of one of those two functions, not on the raw
+  `libheif` global.
 - The decoded JPEG becomes a `blob:` URL stored on `meta.displayUrl`;
   `renderPhoto()` uses that instead of re-deriving the server URL.
   **These are not cleaned up automatically** — `revokeDisplayUrl()` is
@@ -184,6 +204,47 @@ for "has idle time to spare" than "wins a benchmark."
 - `CONFIG.HEIC_JPEG_QUALITY` (0.9) is the only tuning knob — lower it
   if decoded blob sizes/memory ever become a concern; there's no
   reason to expect they will at one photo every 15s.
+
+## App icon (personal photo, kept out of the repo)
+
+`src/largeIcon.png` (130x130, the webOS `largeIcon` size) and
+`src/icon.png` (80x80, generated from it) in the repo are always
+generic placeholders — the real icon is a personal photo the repo
+owner doesn't want committed in the clear, including as base64 inside
+a GitHub Actions secret's cleartext value.
+
+Two approaches were tried and rejected before landing on the current
+one — if either comes up again, it's already been ruled out, not
+overlooked:
+- **A `WEBOS_APP_ICON_B64` secret holding the base64 PNG directly** —
+  hit GitHub's hard 48 KB per-secret cap in practice (a 130x130 PNG
+  can exceed that depending on export settings), and even under the
+  cap, a secret's cleartext value still isn't the right place to store
+  something that's actually sensitive rather than merely inconvenient.
+- **Committing the real `largeIcon.png` straight into the repo** —
+  solves the size limit but not the actual privacy requirement; never
+  implemented for real once "it's a personal photo" was clarified.
+
+What's actually implemented: `src/largeIcon.png.gpg` is the real
+icon, GPG-symmetric-encrypted and committed (safe even in a public
+repo — unreadable without the passphrase). The workflow's "Decrypt
+icon and generate icon.png" step decrypts it using the small
+`ICON_DECRYPT_PASSPHRASE` repo secret, validates the result (PNG
+signature + exact 130x130), and downscales it via `sharp` to produce
+`icon.png` — all inside the CI runner's ephemeral filesystem, never
+written back to the repo. See README section (d) for the exact local
+`gpg` commands. Skipped cleanly (placeholders ship) if either the
+secret or the `.gpg` file is missing — this was deliberately made
+optional rather than required, so the workflow still succeeds for a
+fork/PR that hasn't set it up.
+
+One YAML gotcha hit along the way: **`secrets` cannot be referenced
+directly in a step's `if:` condition** — GitHub Actions rejects that
+at parse time (`Unrecognized named-value: 'secrets'`). The workaround,
+used here, is mirroring the secret into a job-level `env:` var first,
+then checking `env.ICON_DECRYPT_PASSPHRASE != ''` in the `if:`
+instead. If a future secret ever needs a similar opt-in `if:` guard on
+a step, this is the pattern to reuse rather than re-discovering it.
 
 ## Screensaver suppression
 
@@ -277,6 +338,15 @@ structured even though the specific APIs are gone:
   Chromium build decodes natively. See "HEIC photos" above; don't
   re-diagnose "Image failed to load" errors as a server/network
   problem without first checking `meta.filename`'s extension.
+- **`libheif.HeifDecoder is not a constructor`**: hit this for real in
+  both `heic-worker.js` and `decodeHeicOnMainThread()` at once — the
+  vendored `libheif` global is a factory function that must be called
+  and awaited (`await libheif()`) before `.HeifDecoder` exists; it's
+  not already an initialized module. See "HEIC photos" above for the
+  fix (`getLibheifModule()`/`getMainThreadLibheifModule()`). If this
+  exact error resurfaces, it's almost certainly a new call site
+  constructing `HeifDecoder` from the raw `libheif` global again
+  instead of going through one of those two functions.
 - **Nominatim throttling is app-wide, not per-caller** — `geocodeChain`
   serializes every `reverseGeocode()` call through one queue regardless
   of how many photos are being prefetched concurrently. If a second,

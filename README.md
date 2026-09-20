@@ -466,6 +466,12 @@ diverged from a "textbook" version in a few deliberate ways:
   "HEIC photos" section for how and why. Nothing to configure; it's
   automatic based on filename extension. `CONFIG.HEIC_JPEG_QUALITY`
   (0.9) is the one tuning knob, if decoded file sizes ever matter.
+- **Filename overlay**: `CONFIG.SHOW_FILENAME_OVERLAY` (default `true`)
+  shows the current photo's filename as a small line under the
+  date/location overlay — handy for matching what's on screen against
+  `ares-inspect`/LAN-server logs while debugging, but it's a raw
+  filename rather than "ambient" content. Flip to `false` once you're
+  not actively troubleshooting.
 - webOS's browser engine is Chromium-based and modern enough for all the
   `fetch`/`async`/`URLSearchParams` used here, but if you're targeting a
   very old webOS 4 firmware revision, test on the actual TV early —
