@@ -356,24 +356,23 @@ function extractPlaceName(nominatimJson) {
   const address = nominatimJson && nominatimJson.address;
   if (!address) return null;
 
-  // Most specific first: a directly-named feature (a landmark, a
-  // named road, a business — Nominatim populates the top-level `name`
-  // whenever the coordinate resolves to one), then a street address,
-  // then a neighbourhood/suburb, then progressively broader
-  // administrative areas. Picks the most specific of these that's
-  // actually present, rather than always using the broadest (city)
-  // like before zoom=18.
+  // Every level Nominatim returned, most specific first — not just
+  // the single most specific one. Per-level values, most to least
+  // specific:
+  const name = nominatimJson.name || null; // a landmark/business/named road, if the coordinate resolved to one
   const street = [address.house_number, address.road].filter(Boolean).join(" ") || null;
-  const specific = nominatimJson.name || street || address.neighbourhood || address.suburb || address.quarter;
-  const locality = address.city || address.town || address.village || address.municipality || address.county;
-  const country = address.country;
+  const neighborhood = address.neighbourhood || address.suburb || address.quarter || null;
+  const city = address.city || address.town || address.village || address.municipality || null;
+  const county = address.county || null;
 
-  const parts = [];
-  if (specific) parts.push(specific);
-  if (locality && locality !== specific) parts.push(locality);
-  if (country) parts.push(country);
+  // Joined together and deduplicated (a level can repeat another —
+  // e.g. `city` and `county` are sometimes identical) rather than
+  // picking just one. Note: doesn't include address.country — ask if
+  // you want that appended back on for photos taken abroad.
+  const parts = [name, street, neighborhood, city, county].filter(Boolean);
+  const deduped = parts.filter((part, i) => parts.indexOf(part) === i);
 
-  return parts.length ? parts.join(", ") : null;
+  return deduped.length ? deduped.join(", ") : null;
 }
 
 function reverseGeocode(coords) {
