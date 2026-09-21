@@ -363,13 +363,12 @@ function extractPlaceName(nominatimJson) {
   const street = [address.house_number, address.road].filter(Boolean).join(" ") || null;
   const neighborhood = address.neighbourhood || address.suburb || address.quarter || null;
   const city = address.city || address.town || address.village || address.municipality || null;
-  const county = address.county || null;
+  const country = address.country || null;
 
   // Joined together and deduplicated (a level can repeat another —
-  // e.g. `city` and `county` are sometimes identical) rather than
-  // picking just one. Note: doesn't include address.country — ask if
-  // you want that appended back on for photos taken abroad.
-  const parts = [name, street, neighborhood, city, county].filter(Boolean);
+  // e.g. a city-state where `city` and `country` come back the same)
+  // rather than picking just one.
+  const parts = [name, street, neighborhood, city, country].filter(Boolean);
   const deduped = parts.filter((part, i) => parts.indexOf(part) === i);
 
   return deduped.length ? deduped.join(", ") : null;
