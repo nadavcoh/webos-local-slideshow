@@ -244,9 +244,15 @@ async function fetchPhotoByWaId(waId) {
 /**
  * Shared tail end for both fetchRandomPhoto() and fetchPhotoByWaId()
  * above: given a `wa` row (just its `id` and `id_hash`), fetches the
- * joined `hashes` row and attaches the wa `id` — not `id_hash` — as
- * `meta.waId`, since `id` is what's actually shown on screen and
- * logged (id_hash is only ever used internally, as the join key).
+ * joined `hashes` row and attaches both the wa `id` (as `meta.waId`,
+ * shown on screen and logged) and `id_hash` (as `meta.hashId`). The
+ * latter used to be purely an internal join key, but the photo server
+ * now needs it too: several `wa` rows can share the same `filename`
+ * (WhatsApp's own download naming isn't unique), and duplicates are
+ * disambiguated on disk as "name.jpg", "name(1).jpg", "name(2).jpg" —
+ * the server picks the right one by matching each candidate's EXIF
+ * date against this specific hashes row's timestamp, which requires
+ * knowing which hashes row (i.e. which hash_id) is being requested.
  */
 async function fetchPhotoByWaRow(waRow) {
   const { data: hashRows, error: hashError } = await supabaseClient
@@ -260,6 +266,7 @@ async function fetchPhotoByWaRow(waRow) {
   if (!meta) throw new Error(`No hashes row found for wa id ${waRow.id} (id_hash ${waRow.id_hash}).`);
 
   meta.waId = waRow.id;
+  meta.hashId = waRow.id_hash;
   // Logged at fetch time (not render time) so that if anything later
   // in the pipeline throws — HEIC decode, geocoding, whatever — the
   // console already shows which photo was in flight, right above the
@@ -466,7 +473,13 @@ function formatTimestamp(meta) {
 }
 
 function photoImageUrl(meta) {
-  return `${CONFIG.PHOTO_SERVER_URL}/${encodeURIComponent(meta.filename)}`;
+  // hash_id lets the server pick the right file when meta.filename maps
+  // to more than one on-disk file (see the comment on fetchPhotoByWaRow
+  // for why that happens and how the server resolves it). Harmless to
+  // send even when the filename turns out to be unique — the server
+  // only uses it if there's more than one candidate.
+  const base = `${CONFIG.PHOTO_SERVER_URL}/${encodeURIComponent(meta.filename)}`;
+  return meta.hashId ? `${base}?hash_id=${encodeURIComponent(meta.hashId)}` : base;
 }
 
 /* ============================================================
