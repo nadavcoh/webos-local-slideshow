@@ -38,23 +38,33 @@ def _db_connect():
 
 
 def _colliding_wa_rows():
-    """wa rows (with a matched hashes row) whose filename is shared by
-    more than one wa row."""
+    """wa rows eligible for the slideshow - same filter fetchRandomPhoto()
+    in app.js uses (id_hash present, processed, image filetypes only, so
+    videos and not-yet-processed rows never show up here) - whose
+    hashes.filename (what photoImageUrl() actually requests, not
+    wa.filename) is shared by more than one such row."""
     conn = _db_connect()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cur.execute("""
-            SELECT wa.id AS wa_id, wa.filename, wa.id_hash AS hash_id,
-                   hashes.timestamp, hashes.camera_name
+            SELECT wa.id AS wa_id, wa.id_hash AS hash_id,
+                   hashes.filename, hashes.timestamp, hashes.camera_name
             FROM wa
             JOIN hashes ON wa.id_hash = hashes.id
-            WHERE wa.filename IN (
-                SELECT filename FROM wa
-                WHERE id_hash IS NOT NULL
-                GROUP BY filename
-                HAVING COUNT(*) > 1
-            )
-            ORDER BY wa.filename, hashes.timestamp
+            WHERE wa.id_hash IS NOT NULL
+              AND wa.processed = true
+              AND wa.filetype IN ('Image', 'image/jpeg')
+              AND hashes.filename IN (
+                  SELECT h.filename
+                  FROM wa w
+                  JOIN hashes h ON w.id_hash = h.id
+                  WHERE w.id_hash IS NOT NULL
+                    AND w.processed = true
+                    AND w.filetype IN ('Image', 'image/jpeg')
+                  GROUP BY h.filename
+                  HAVING COUNT(*) > 1
+              )
+            ORDER BY hashes.filename, hashes.timestamp
         """)
         return cur.fetchall()
     finally:
