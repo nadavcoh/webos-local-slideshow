@@ -64,11 +64,13 @@ const CONFIG = {
   HISTORY_MAX: 50, // how many recently-shown photos Left/Right can browse back through
   PREFETCH_DEPTH: 3, // how many upcoming photos to have fetched + image-preloaded ahead of time
 
-  // Shows meta.filename as a small on-screen overlay (see renderPhoto)
-  // — handy for correlating what's on screen against ares-inspect /
-  // LAN-server logs while debugging (e.g. the HEIC decode work), but
-  // it's a raw filename, not really "ambient" content — flip to false
-  // once you're done troubleshooting and just want date + location.
+  // Shows the wa id + meta.filename as a small on-screen overlay (see
+  // renderPhoto) — handy for correlating what's on screen against
+  // ares-inspect/LAN-server logs while debugging (e.g. the HEIC
+  // decode work — also see debugShowPhoto() near the bottom of this
+  // file), but it's raw debug info, not really "ambient" content —
+  // flip to false once you're done troubleshooting and just want
+  // date + location.
   SHOW_FILENAME_OVERLAY: true,
 
   // wa.filetype values considered "an image" — adjust here if the
@@ -219,6 +221,35 @@ async function runPairing() {
  * ============================================================ */
 
 /**
+ * Fetches a single photo's metadata by its wa id (== `hashes.id`, and
+ * the same value as `wa.id_hash` — the join key between the two
+ * tables) directly, rather than picking a random one. Used both by
+ * fetchRandomPhoto() below and by the debugShowPhoto() console helper
+ * (see the bottom of this file) for pulling up one specific photo —
+ * e.g. to re-inspect exactly the file a previous decode failure named.
+ */
+async function fetchPhotoById(waId) {
+  const { data: hashRows, error: hashError } = await supabaseClient
+    .from("hashes")
+    .select("filename, location, location_name, timestamp")
+    .eq("id", waId)
+    .limit(1);
+
+  if (hashError) throw hashError;
+  const meta = hashRows && hashRows[0];
+  if (!meta) throw new Error(`No hashes row found for wa id ${waId}.`);
+
+  meta.waId = waId;
+  // Logged at fetch time (not render time) so that if anything later
+  // in the pipeline throws — HEIC decode, geocoding, whatever — the
+  // console already shows which photo was in flight, right above the
+  // error. Covers both the random path and debugShowPhoto(), since
+  // both go through this one function.
+  console.log(`Fetched wa id ${waId} — ${meta.filename}`);
+  return meta;
+}
+
+/**
  * Picks one random eligible row from `wa` and returns its joined
  * metadata from `hashes`. PostgREST's query builder has no direct
  * "order by random()", so this is a count-then-random-offset pair of
@@ -251,17 +282,7 @@ async function fetchRandomPhoto() {
   const idHash = waRows && waRows[0] && waRows[0].id_hash;
   if (!idHash) throw new Error("Random wa row had no id_hash.");
 
-  const { data: hashRows, error: hashError } = await supabaseClient
-    .from("hashes")
-    .select("filename, location, location_name, timestamp")
-    .eq("id", idHash)
-    .limit(1);
-
-  if (hashError) throw hashError;
-  const meta = hashRows && hashRows[0];
-  if (!meta) throw new Error(`No hashes row found for id_hash ${idHash}.`);
-
-  return meta;
+  return fetchPhotoById(idHash);
 }
 
 /**
@@ -277,11 +298,13 @@ function parseLocationName(raw) {
     .map((line) => line.trim())
     .filter(Boolean);
   const name = lines[0] || "";
-  // Google Photos shows this literal placeholder when a photo has no
-  // location tagged at all — it's not a real place name, so treat it
-  // the same as an empty field (formatLocation falls back to coords,
-  // then to nothing).
-  if (name.toLowerCase() === "add a location") return "";
+  const lower = name.toLowerCase();
+  // Google Photos shows "Add a location" when nothing's tagged, and
+  // some rows carry the literal string "Unknown location" — neither
+  // is a real place name, so treat both the same as an empty field
+  // (formatLocation falls back to reverse-geocoded coords, then to
+  // nothing).
+  if (lower === "add a location" || lower === "unknown location") return "";
   return name;
 }
 
@@ -738,7 +761,7 @@ async function renderPhoto(meta) {
   hiddenLayer.src = url;
   el.overlayDate.textContent = formatTimestamp(meta);
   el.overlayLocation.textContent = formatLocation(meta);
-  el.overlayFilename.textContent = CONFIG.SHOW_FILENAME_OVERLAY ? meta.filename : "";
+  el.overlayFilename.textContent = CONFIG.SHOW_FILENAME_OVERLAY ? `${meta.waId} — ${meta.filename}` : "";
 
   // Crossfade: fade the new layer in, fade the old one out, then swap roles.
   hiddenLayer.classList.add("visible");
@@ -978,6 +1001,50 @@ function suppressScreenSaverViaLuna() {
     console.error("Screensaver suppression failed to register:", e);
   }
 }
+
+/* ============================================================
+ * DEBUGGING — console helpers, callable from ares-inspect
+ * ============================================================ */
+
+/**
+ * Pulls up one specific photo by its wa id (== hashes.id == wa.id_hash
+ * — the value shown in the on-screen filename overlay, and logged by
+ * fetchPhotoById() whenever any photo is fetched) and displays it
+ * immediately, bypassing the normal random selection. For re-inspecting
+ * exactly the file a previous console error named, without waiting for
+ * random chance to show it again.
+ *
+ * Call from the ares-inspect console with whatever value the on-screen
+ * overlay or a console log line showed for that photo's wa id (it's
+ * `id_hash` — a hash string, not a sequential number) — e.g.
+ * `debugShowPhoto("a1b2c3d4...")`.
+ *
+ * This is a one-off preview, not a queue operation: it doesn't touch
+ * `history` or `upcoming`, so Left/Right browsing and the prefetch
+ * queue are unaffected, and the normal slide timer will move on to
+ * whatever's next in `upcoming` at its next interval as usual — this
+ * just paints one photo in the meantime.
+ */
+window.debugShowPhoto = function debugShowPhoto(waId) {
+  return (async () => {
+    const meta = await fetchPhotoById(waId);
+    const coords = parseMapsCoords(meta.location);
+    await Promise.all([
+      resolveAndPreload(meta),
+      coords
+        ? reverseGeocode(coords).then((place) => {
+            meta.geocodedPlace = place;
+          })
+        : Promise.resolve(),
+    ]);
+    await renderPhoto(meta);
+    console.log(`[debugShowPhoto] Rendered wa id ${meta.waId} — ${meta.filename}.`);
+    return meta;
+  })().catch((err) => {
+    console.error(`[debugShowPhoto] Failed for wa id ${waId}:`, err);
+    throw err;
+  });
+};
 
 /* ============================================================
  * BOOT SEQUENCE
