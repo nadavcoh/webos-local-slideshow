@@ -221,31 +221,51 @@ async function runPairing() {
  * ============================================================ */
 
 /**
- * Fetches a single photo's metadata by its wa id (== `hashes.id`, and
- * the same value as `wa.id_hash` — the join key between the two
- * tables) directly, rather than picking a random one. Used both by
- * fetchRandomPhoto() below and by the debugShowPhoto() console helper
- * (see the bottom of this file) for pulling up one specific photo —
- * e.g. to re-inspect exactly the file a previous decode failure named.
+ * Fetches a single photo's metadata by its wa id — that's `wa.id`,
+ * the `wa` table's own primary key, NOT `id_hash` (which is just the
+ * join key to `hashes` and was never meant to be user-facing)
+ * directly, rather than picking a random one. Used by the
+ * debugShowPhoto() console helper (see the bottom of this file) to
+ * pull up one specific photo — e.g. to re-inspect exactly the file a
+ * previous decode failure named — by the same id shown in the
+ * overlay/logged to console.
  */
-async function fetchPhotoById(waId) {
+async function fetchPhotoByWaId(waId) {
+  const { data: waRows, error: waError } = await supabaseClient.from("wa").select("id, id_hash").eq("id", waId).limit(1);
+
+  if (waError) throw waError;
+  const waRow = waRows && waRows[0];
+  if (!waRow) throw new Error(`No wa row found for id ${waId}.`);
+  if (!waRow.id_hash) throw new Error(`wa row ${waId} has no id_hash.`);
+
+  return fetchPhotoByWaRow(waRow);
+}
+
+/**
+ * Shared tail end for both fetchRandomPhoto() and fetchPhotoByWaId()
+ * above: given a `wa` row (just its `id` and `id_hash`), fetches the
+ * joined `hashes` row and attaches the wa `id` — not `id_hash` — as
+ * `meta.waId`, since `id` is what's actually shown on screen and
+ * logged (id_hash is only ever used internally, as the join key).
+ */
+async function fetchPhotoByWaRow(waRow) {
   const { data: hashRows, error: hashError } = await supabaseClient
     .from("hashes")
     .select("filename, location, location_name, timestamp")
-    .eq("id", waId)
+    .eq("id", waRow.id_hash)
     .limit(1);
 
   if (hashError) throw hashError;
   const meta = hashRows && hashRows[0];
-  if (!meta) throw new Error(`No hashes row found for wa id ${waId}.`);
+  if (!meta) throw new Error(`No hashes row found for wa id ${waRow.id} (id_hash ${waRow.id_hash}).`);
 
-  meta.waId = waId;
+  meta.waId = waRow.id;
   // Logged at fetch time (not render time) so that if anything later
   // in the pipeline throws — HEIC decode, geocoding, whatever — the
   // console already shows which photo was in flight, right above the
   // error. Covers both the random path and debugShowPhoto(), since
-  // both go through this one function.
-  console.log(`Fetched wa id ${waId} — ${meta.filename}`);
+  // both funnel through this one function.
+  console.log(`Fetched wa id ${waRow.id} — ${meta.filename}`);
   return meta;
 }
 
@@ -271,7 +291,7 @@ async function fetchRandomPhoto() {
 
   const { data: waRows, error: waError } = await supabaseClient
     .from("wa")
-    .select("id_hash")
+    .select("id, id_hash")
     .not("id_hash", "is", null)
     .eq("processed", true)
     .in("filetype", CONFIG.IMAGE_FILETYPES)
@@ -279,10 +299,10 @@ async function fetchRandomPhoto() {
     .range(offset, offset);
 
   if (waError) throw waError;
-  const idHash = waRows && waRows[0] && waRows[0].id_hash;
-  if (!idHash) throw new Error("Random wa row had no id_hash.");
+  const waRow = waRows && waRows[0];
+  if (!waRow || !waRow.id_hash) throw new Error("Random wa row had no id_hash.");
 
-  return fetchPhotoById(idHash);
+  return fetchPhotoByWaRow(waRow);
 }
 
 /**
@@ -1027,17 +1047,20 @@ function suppressScreenSaverViaLuna() {
  * ============================================================ */
 
 /**
- * Pulls up one specific photo by its wa id (== hashes.id == wa.id_hash
- * — the value shown in the on-screen filename overlay, and logged by
- * fetchPhotoById() whenever any photo is fetched) and displays it
- * immediately, bypassing the normal random selection. For re-inspecting
- * exactly the file a previous console error named, without waiting for
- * random chance to show it again.
+ * Pulls up one specific photo by its wa id (`wa.id` — the value shown
+ * in the on-screen overlay and logged by fetchPhotoByWaRow() whenever
+ * any photo is fetched — NOT id_hash, which stays internal) and
+ * displays it immediately, bypassing the normal random selection.
+ * Looks the row up in `wa` first to resolve its id_hash, then
+ * continues exactly like the random path from there (see
+ * fetchPhotoByWaId()). For re-inspecting exactly the file a previous
+ * console error named, without waiting for random chance to show it
+ * again.
  *
  * Call from the ares-inspect console with whatever value the on-screen
- * overlay or a console log line showed for that photo's wa id (it's
- * `id_hash` — a hash string, not a sequential number) — e.g.
- * `debugShowPhoto("a1b2c3d4...")`.
+ * overlay or a console log line showed for that photo's wa id — e.g.
+ * `debugShowPhoto(4821)` (check the overlay/console for the actual
+ * value and type; it's whatever `wa.id`'s column type is).
  *
  * This is a one-off preview, not a queue operation: it doesn't touch
  * `history` or `upcoming`, so Left/Right browsing and the prefetch
@@ -1047,7 +1070,7 @@ function suppressScreenSaverViaLuna() {
  */
 window.debugShowPhoto = function debugShowPhoto(waId) {
   return (async () => {
-    const meta = await fetchPhotoById(waId);
+    const meta = await fetchPhotoByWaId(waId);
     const coords = parseMapsCoords(meta.location);
     await Promise.all([
       resolveAndPreload(meta),
