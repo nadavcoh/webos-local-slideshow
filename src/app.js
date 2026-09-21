@@ -619,19 +619,31 @@ function decodeHeicToJpegBlob(arrayBuffer) {
   return worker ? decodeHeicViaWorker(worker, arrayBuffer) : decodeHeicOnMainThread(arrayBuffer);
 }
 
-/** Sanity-checks that `bytes` actually looks like an ISO-BMFF
- *  (HEIF/HEIC/MP4-family) container before it's handed to libheif —
- *  every such file has a 4-byte box size followed by the ASCII bytes
- *  "ftyp", starting at offset 4. Returns null if the check passes, or
- *  a diagnostic message (with a guess at what the bytes actually are)
- *  if it doesn't — catching "this wasn't actually a HEIC file, despite
- *  the extension" here, with something actionable in the console,
- *  rather than only surfacing libheif's much less legible internal
- *  parse error ("No 'ftyp' box...") after a wasted worker round trip. */
-function heicSignatureError(bytes, url) {
+/** Sniffs the actual format of bytes that were fetched because the
+ *  filename said HEIC — confirmed in practice: at least one WhatsApp-
+ *  sourced file (`IMG_7354.HEIC`) is named `.HEIC` but is already
+ *  JPEG-encoded (`FF D8 FF E0...`), almost certainly WhatsApp's own
+ *  HEIC->JPEG conversion (for cross-platform compatibility) having
+ *  kept the original filename. So this can't just validate — it
+ *  needs to say what to actually do next:
+ *    - {kind: "heic"}                  — genuine ISO-BMFF/HEIF container (has
+ *                                         the "ftyp" box at offset 4) — decode it.
+ *    - {kind: "browser-native", mime}  — already JPEG/PNG despite the
+ *                                         extension — no decode needed at all.
+ *    - throws                          — not an image we can do anything
+ *                                         with (HTML error page, empty body,
+ *                                         genuinely unrecognized bytes) — with
+ *                                         a guess and a hex dump, rather than
+ *                                         only libheif's much less legible
+ *                                         internal parse error ("No 'ftyp'
+ *                                         box...") after a wasted decode. */
+function sniffHeicNamedFile(bytes, url) {
   const view = new Uint8Array(bytes);
   const isFtyp = view.length >= 8 && view[4] === 0x66 && view[5] === 0x74 && view[6] === 0x79 && view[7] === 0x70; // "ftyp"
-  if (isFtyp) return null;
+  if (isFtyp) return { kind: "heic" };
+
+  if (view[0] === 0xff && view[1] === 0xd8) return { kind: "browser-native", mime: "image/jpeg" };
+  if (view[0] === 0x89 && view[1] === 0x50 && view[2] === 0x4e && view[3] === 0x47) return { kind: "browser-native", mime: "image/png" };
 
   const hex = Array.from(view.slice(0, 16))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -639,19 +651,23 @@ function heicSignatureError(bytes, url) {
 
   let guess = "unrecognized format";
   if (view.length === 0) guess = "empty response body";
-  else if (view[0] === 0xff && view[1] === 0xd8) guess = "looks like a JPEG, not HEIC — is this file misnamed/mistagged?";
-  else if (view[0] === 0x89 && view[1] === 0x50 && view[2] === 0x4e && view[3] === 0x47) guess = "looks like a PNG, not HEIC";
-  else if (/^\s*(<!doctype|<html)/i.test(String.fromCharCode(...view.slice(0, 15)))) guess = "looks like an HTML page, not an image — wrong URL, or the LAN server returned an error page with a 200 status?";
+  else if (/^\s*(<!doctype|<html)/i.test(String.fromCharCode(...view.slice(0, 15))))
+    guess = "looks like an HTML page, not an image — wrong URL, or the LAN server returned an error page with a 200 status?";
 
-  return `${url} doesn't look like a valid HEIF/HEIC file (no 'ftyp' box at offset 4) — ${guess}. First ${view.length < 16 ? view.length : 16} bytes: ${hex || "(none)"}; ${view.length} bytes total.`;
+  throw new Error(
+    `${url} doesn't look like a valid HEIF/HEIC file (no 'ftyp' box at offset 4), nor a JPEG/PNG we can just display directly — ${guess}. First ${
+      view.length < 16 ? view.length : 16
+    } bytes: ${hex || "(none)"}; ${view.length} bytes total.`
+  );
 }
 
 /** Returns the URL renderPhoto/preloadImage should actually use: the
  *  LAN server URL directly for anything the browser can decode
- *  natively, or a locally-decoded blob: URL for HEIC/HEIF. The caller
- *  is responsible for eventually revoking that blob URL (see
- *  revokeDisplayUrl) — it isn't cleaned up automatically, and this
- *  app runs unattended for weeks at a time. */
+ *  natively, or a locally-decoded blob: URL for HEIC/HEIF (or for a
+ *  HEIC-named file that turns out to already be JPEG/PNG — see
+ *  sniffHeicNamedFile). The caller is responsible for eventually
+ *  revoking that blob URL (see revokeDisplayUrl) — it isn't cleaned
+ *  up automatically, and this app runs unattended for weeks at a time. */
 async function resolvePhotoDisplayUrl(meta) {
   const rawUrl = photoImageUrl(meta);
   if (!isHeic(meta.filename)) return rawUrl;
@@ -660,8 +676,14 @@ async function resolvePhotoDisplayUrl(meta) {
   if (!res.ok) throw new Error(`Photo server returned ${res.status} for ${meta.filename}`);
   const bytes = await res.arrayBuffer();
 
-  const sigError = heicSignatureError(bytes, rawUrl);
-  if (sigError) throw new Error(sigError);
+  const sniff = sniffHeicNamedFile(bytes, rawUrl);
+  if (sniff.kind === "browser-native") {
+    // Already fetched the bytes — no need to re-fetch via the raw URL
+    // and no need to decode; just wrap what we have with the right
+    // mime type and use it exactly like any other browser-native image.
+    console.log(`${meta.filename} is named HEIC but is actually ${sniff.mime} — using it directly, no decode needed.`);
+    return URL.createObjectURL(new Blob([bytes], { type: sniff.mime }));
+  }
 
   const jpegBlob = await decodeHeicToJpegBlob(bytes);
   return URL.createObjectURL(jpegBlob);

@@ -206,14 +206,16 @@ for "has idle time to spare" than "wins a benchmark."
 - `CONFIG.HEIC_JPEG_QUALITY` (0.9) is the only tuning knob — lower it
   if decoded blob sizes/memory ever become a concern; there's no
   reason to expect they will at one photo every 15s.
-- **`heicSignatureError()`** runs right after the raw bytes are
-  fetched, before they're handed to the worker — it checks for the
-  ISO-BMFF `ftyp` box at offset 4 and, if it's missing, throws with a
-  guess at what the bytes actually are (JPEG/PNG/HTML/empty/other)
-  plus a hex dump, rather than letting libheif's much less legible
-  internal parse error ("No 'ftyp' box...") be the only signal. Added
-  after a real HEIC-named file failed to decode for reasons that
-  turned out to need this diagnostic to even start narrowing down.
+- **`sniffHeicNamedFile()`** runs right after the raw bytes are
+  fetched, before anything is handed to the worker — it checks for the
+  ISO-BMFF `ftyp` box at offset 4. If found, decode as HEIC as usual.
+  If the bytes are actually JPEG/PNG despite the `.heic`/`.HEIC`
+  extension — confirmed real, see the Gotchas entry below — skip
+  decoding entirely and use the already-fetched bytes directly as a
+  blob URL with the right mime type. Only genuinely unrecognized bytes
+  throw, with a guess (HTML/empty/other) and a hex dump, rather than
+  letting libheif's much less legible internal parse error ("No
+  'ftyp' box...") be the only signal.
 
 ## Debugging console helpers
 
@@ -407,16 +409,24 @@ structured even though the specific APIs are gone:
   exact error resurfaces, it's almost certainly a new call site
   constructing `HeifDecoder` from the raw `libheif` global again
   instead of going through one of those two functions.
-- **"No 'ftyp' box" from inside the WASM decoder** means the bytes
-  handed to libheif weren't a valid HEIF container at all — not a
-  libheif bug, and not necessarily the LAN server's fault either.
-  `heicSignatureError()` in `resolvePhotoDisplayUrl()` checks for this
-  *before* the fetched bytes ever reach the worker, and logs a
-  specific guess (JPEG/PNG/HTML/empty body/genuinely unrecognized,
-  with a hex dump) instead of just letting the opaque parse error
-  through. If this fires, the diagnostic message itself says what to
-  look at next — resist the urge to add a second, different check
-  elsewhere; extend this one instead.
+- **"No 'ftyp' box" from inside the WASM decoder would mean** the
+  bytes handed to libheif weren't a valid HEIF container — but as of
+  `sniffHeicNamedFile()`, this should no longer actually reach
+  libheif at all for the one confirmed cause: some files are named
+  `.heic`/`.HEIC` but are already JPEG-encoded (confirmed real —
+  `IMG_7354.HEIC` from WhatsApp-sourced media started with `FF D8 FF
+  E0`, a standard JPEG header — almost certainly WhatsApp's own
+  HEIC->JPEG conversion, for cross-platform compatibility, having kept
+  the original filename). `sniffHeicNamedFile()` in
+  `resolvePhotoDisplayUrl()` checks the actual bytes before any decode
+  is attempted: real HEIC decodes as before, JPEG/PNG-despite-the-
+  extension uses the already-fetched bytes directly as a blob URL (no
+  redundant re-fetch, no decode needed), and only genuinely
+  unrecognized bytes throw — with a guess and a hex dump. If this
+  exact libheif error ever resurfaces despite that, it means there's a
+  *third* HEIC-named-but-not-HEIC case sniffHeicNamedFile() doesn't
+  handle yet — extend it with the new signature rather than adding a
+  second, separate check elsewhere.
 - **Nominatim throttling is app-wide, not per-caller** — `geocodeChain`
   serializes every `reverseGeocode()` call through one queue regardless
   of how many photos are being prefetched concurrently. If a second,
