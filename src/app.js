@@ -331,12 +331,19 @@ function parseMapsCoords(raw) {
  *     sends automatically instead, which does identify this app's own
  *     domain — the commonly-accepted workaround for browser-side
  *     Nominatim usage.
- * `geocodeCache` is keyed to ~100m buckets (3 decimal places) since
- * many photos taken near each other resolve to the same place name —
- * this avoids a repeat request every time, not just within one prefetch
- * batch but for the lifetime of the app.
+ * `zoom=18` (confirmed against Nominatim's own docs) asks for
+ * building-level detail — their highest. `extractPlaceName()` then
+ * picks the most specific level actually present in the response
+ * (a named feature, then a street address, then a neighbourhood,
+ * falling back to city/country) rather than only ever reading the
+ * city-level fields.
+ * `geocodeCache` is keyed to ~11m buckets (4 decimal places) — tight
+ * enough that neighboring buildings/streets don't collide and share a
+ * cached name now that results are this specific, while still
+ * deduping near-identical GPS readings (a few meters of jitter) from
+ * repeated shots at the same spot.
  */
-const geocodeCache = new Map(); // "lat,lng" (3dp) -> place name string | null
+const geocodeCache = new Map(); // "lat,lng" (4dp, ~11m) -> place name string | null
 const GEOCODE_MIN_INTERVAL_MS = 1100;
 let lastGeocodeAt = 0;
 let geocodeChain = Promise.resolve();
@@ -348,14 +355,29 @@ function sleep(ms) {
 function extractPlaceName(nominatimJson) {
   const address = nominatimJson && nominatimJson.address;
   if (!address) return null;
-  const locality = address.city || address.town || address.village || address.municipality || address.suburb || address.county;
+
+  // Most specific first: a directly-named feature (a landmark, a
+  // named road, a business — Nominatim populates the top-level `name`
+  // whenever the coordinate resolves to one), then a street address,
+  // then a neighbourhood/suburb, then progressively broader
+  // administrative areas. Picks the most specific of these that's
+  // actually present, rather than always using the broadest (city)
+  // like before zoom=18.
+  const street = [address.house_number, address.road].filter(Boolean).join(" ") || null;
+  const specific = nominatimJson.name || street || address.neighbourhood || address.suburb || address.quarter;
+  const locality = address.city || address.town || address.village || address.municipality || address.county;
   const country = address.country;
-  if (locality && country) return `${locality}, ${country}`;
-  return locality || country || null;
+
+  const parts = [];
+  if (specific) parts.push(specific);
+  if (locality && locality !== specific) parts.push(locality);
+  if (country) parts.push(country);
+
+  return parts.length ? parts.join(", ") : null;
 }
 
 function reverseGeocode(coords) {
-  const key = `${coords.lat.toFixed(3)},${coords.lng.toFixed(3)}`;
+  const key = `${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
   if (geocodeCache.has(key)) return Promise.resolve(geocodeCache.get(key));
 
   const run = async () => {
@@ -365,7 +387,7 @@ function reverseGeocode(coords) {
 
     try {
       const res = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${coords.lat}&lon=${coords.lng}&zoom=10&addressdetails=1`
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${coords.lat}&lon=${coords.lng}&zoom=18&addressdetails=1`
       );
       if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
       const place = extractPlaceName(await res.json());
