@@ -36,9 +36,12 @@ current architecture:
   photos already fetched, image-preloaded, and reverse-geocoded
   (coords → place name, via Nominatim) ahead of time, so skipping
   doesn't wait on a fresh round trip.
-- **Photo bytes**: a plain, unauthenticated HTTP server on a machine
-  in the home LAN, serving files by filename. Not Supabase Storage,
-  not Backblaze — just a local static file server.
+- **Photo bytes**: an unauthenticated HTTP server on a machine in the
+  home LAN, serving files by filename. Not Supabase Storage, not
+  Backblaze — a local server, but not a *bare static* one anymore: it
+  also disambiguates duplicate filenames using `hash_id`, sent by the
+  TV app on every request. See "Duplicate filenames on the LAN photo
+  server" below.
 - **TV-to-mobile auth handoff**: a small Next.js web app (separate
   deployment, in `webapp/` if pulled into this repo — see "Repo
   layout") with two API routes backed by Vercel KV:
@@ -217,6 +220,64 @@ for "has idle time to spare" than "wins a benchmark."
   letting libheif's much less legible internal parse error ("No
   'ftyp' box...") be the only signal.
 
+## Duplicate filenames on the LAN photo server
+
+`wa.filename` isn't unique — WhatsApp's own download naming can collide
+across different messages/photos — so more than one `wa` row can point
+at the same filename. The `phash` repo's `album_wa.py` (not part of
+this repo) already handles this on the write side: its
+`_unique_dest_path()` appends `(1)`, `(2)`, ... — no space — before the
+extension when a name it's about to save already exists in
+`C:\phash_album_downloads`, the folder the LAN server serves from. So
+one `filename` value in the DB can correspond to `name.jpg`,
+`name(1).jpg`, `name(2).jpg`, etc. on disk, and nothing in `wa`/`hashes`
+records which row got which suffix.
+
+This app's `photoImageUrl(meta)` used to build the request URL from
+`meta.filename` alone, which broke for exactly these rows — there's no
+way to know, filename-only, which physical file is "yours." Two things
+changed to fix this, entirely on top of existing data (no DB schema
+change, no re-ingesting/re-scraping WhatsApp or Google Photos):
+
+- **Client**: `fetchPhotoByWaRow()` now attaches `meta.hashId =
+  waRow.id_hash` (previously `id_hash` was dropped after the join —
+  see the "wa.id vs wa.id_hash" gotcha above), and `photoImageUrl()`
+  appends it as `?hash_id=<id>` whenever present. Harmless to send for
+  a `wa` row whose filename turns out to be unique — the server only
+  acts on it when there's actually more than one candidate.
+- **Server**: the LAN photo server (`photo_serve.py`, in the `phash`
+  repo, replacing what used to be a bare `python -m http.server`) lists
+  every on-disk file sharing the requested base name; if there's only
+  one, it's served directly with no DB/EXIF work at all. If there's
+  more than one, it looks up `hashes.timestamp`/`camera_name` for the
+  given `hash_id`, reads EXIF `DateTimeOriginal` off each candidate,
+  and serves whichever is closest in time — duplicates in this library
+  are months apart, so "closest" is decisive; exact-match precision was
+  deliberately not needed. Resolutions are cached in a `dbm` file on
+  disk (thousands of photos, nothing held in memory), keyed by
+  `hash_id`, with a stored candidate count so a newly-added duplicate
+  (a later `album_wa.py` run) invalidates the cached answer instead of
+  silently going stale. `photo_serve_dryrun.py`, alongside it, reports
+  every collision group and what the resolver would pick without
+  needing the TV app wired up — reuse that instead of re-deriving the
+  matching logic if the picks ever need spot-checking again.
+- Why EXIF and not the perceptual hash `wa.hash_bit` already computed
+  at ingest: `hash_bit` was computed from the *original WhatsApp
+  download*, which `gphoto_selenium_whatsapp.py` deletes immediately
+  after hashing. The file actually sitting in
+  `C:\phash_album_downloads` is a *separate* later re-download, from
+  the matched Google Photos item (`album_wa.py`'s
+  `_download_and_move_photo`) — a different encode/compression pass of
+  the same photo, so comparing it against `hash_bit` would need a
+  fuzzy nearest-hamming-distance match rather than the exact-0 match
+  the ingest script itself relies on for same-source dedup. EXIF
+  survives re-encoding; a fuzzy phash comparison risked picking wrong
+  among visually similar candidates. Also don't use `wa.timestamp` for
+  this — it's parsed straight out of the same colliding `filename`
+  string, so rows that share a filename also share that timestamp; use
+  `hashes.timestamp` (reached via `id_hash`) instead, which comes from
+  Google Photos independently.
+
 ## Debugging console helpers
 
 `window.debugShowPhoto(waId)` — callable directly from the
@@ -357,16 +418,21 @@ structured even though the specific APIs are gone:
   `photo-match-next` already uses for its own distance queries.
 - **`wa.id` vs `wa.id_hash` — don't conflate these.** `id` is the
   table's own primary key and is what's shown in the overlay, logged
-  to console, and what `debugShowPhoto()` takes. `id_hash` is purely
-  an internal join key to `hashes.id` and is never shown anywhere.
-  `fetchPhotoByWaRow(waRow)` is the one place that turns a `{id,
-  id_hash}` pair into a full `meta` (with `meta.waId = waRow.id`) —
-  both `fetchRandomPhoto()` and `fetchPhotoByWaId()` (used by
-  `debugShowPhoto()`) funnel through it, so logging/display stays
+  to console, and what `debugShowPhoto()` takes. `id_hash` is the join
+  key to `hashes.id` — still never shown on screen or logged, but as of
+  the duplicate-filename fix (see below) it's no longer *purely*
+  internal either: it's sent to the LAN photo server as `?hash_id=...`
+  on every image request. `fetchPhotoByWaRow(waRow)` is the one place
+  that turns a `{id, id_hash}` pair into a full `meta`, attaching both
+  as `meta.waId` (display/logging) and `meta.hashId` (server-facing,
+  never rendered) — both `fetchRandomPhoto()` and `fetchPhotoByWaId()`
+  (used by `debugShowPhoto()`) funnel through it, so all three stay
   consistent between the two paths. This got mixed up once already —
   an earlier version used `id_hash` for the on-screen "wa id" — so if
-  it comes up confused again, this is the fix to reapply, not a new
-  problem to solve from scratch.
+  the *display* value comes up confused again, that's the fix to
+  reapply. Don't read the fix for that old bug as license to also drop
+  `meta.hashId` or reuse `meta.waId` in its place — they now serve
+  genuinely different purposes.
 - **`hashes.location_name` has two literal placeholder values** —
   `"Add a location"` (Google Photos, when nothing's tagged) and
   `"Unknown location"`. `parseLocationName()` treats both as empty
@@ -467,6 +533,15 @@ GitHub account").
 
 ## Open items / things a new session might need to pick up
 
+- **Deploy `photo_serve.py`** (in the `phash` repo) on the LAN machine
+  in place of the plain `python -m http.server` it's replacing — see
+  "Duplicate filenames on the LAN photo server" above. Until that swap
+  happens, `?hash_id=...` is sent but ignored (a bare static server
+  just serves whatever's literally at that path), so colliding `wa`
+  rows will keep unpredictably showing whichever file happens to sit at
+  the plain `name.jpg` path. Run `photo_serve_dryrun.py` against the
+  real folder/DB first to confirm the picks look right before cutting
+  over.
 - Confirm the Supabase RLS policies on `wa`/`hashes` actually exist in
   the live database (see README.md) — without them the TV app fails
   silently (empty results, not an error).

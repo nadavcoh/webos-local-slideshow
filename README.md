@@ -16,8 +16,15 @@ photo-sharing service. Three pieces:
   and the photo database itself (`wa` + `hashes` tables, fed by a
   separate ingest project — not part of this repo).
 
-Photo bytes themselves come from a plain HTTP server on a machine in
-your home LAN, not from Supabase Storage or any cloud photo service.
+Photo bytes themselves come from a small HTTP server on a machine in
+your home LAN — not from Supabase Storage or any cloud photo service,
+and not a bare static file server either. `wa.filename` isn't
+unique (WhatsApp's own download naming collides), so duplicates land on
+that server as `name.jpg`, `name(1).jpg`, `name(2).jpg`, etc.; the TV
+app sends `?hash_id=<wa.id_hash>` alongside the filename so the server
+can pick the right one. See `CLAUDE.md`'s "Duplicate filenames on the
+LAN photo server" section for how that resolution works and where the
+server script itself lives.
 
 > **Coming from an older checkout?** This app used to run on the
 > Google Photos Picker API via a `pairing-backend/` OAuth bridge.
