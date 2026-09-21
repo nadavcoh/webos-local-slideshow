@@ -64,11 +64,13 @@ const CONFIG = {
   HISTORY_MAX: 50, // how many recently-shown photos Left/Right can browse back through
   PREFETCH_DEPTH: 3, // how many upcoming photos to have fetched + image-preloaded ahead of time
 
-  // Shows meta.filename as a small on-screen overlay (see renderPhoto)
-  // — handy for correlating what's on screen against ares-inspect /
-  // LAN-server logs while debugging (e.g. the HEIC decode work), but
-  // it's a raw filename, not really "ambient" content — flip to false
-  // once you're done troubleshooting and just want date + location.
+  // Shows the wa id + meta.filename as a small on-screen overlay (see
+  // renderPhoto) — handy for correlating what's on screen against
+  // ares-inspect/LAN-server logs while debugging (e.g. the HEIC
+  // decode work — also see debugShowPhoto() near the bottom of this
+  // file), but it's raw debug info, not really "ambient" content —
+  // flip to false once you're done troubleshooting and just want
+  // date + location.
   SHOW_FILENAME_OVERLAY: true,
 
   // wa.filetype values considered "an image" — adjust here if the
@@ -219,6 +221,55 @@ async function runPairing() {
  * ============================================================ */
 
 /**
+ * Fetches a single photo's metadata by its wa id — that's `wa.id`,
+ * the `wa` table's own primary key, NOT `id_hash` (which is just the
+ * join key to `hashes` and was never meant to be user-facing)
+ * directly, rather than picking a random one. Used by the
+ * debugShowPhoto() console helper (see the bottom of this file) to
+ * pull up one specific photo — e.g. to re-inspect exactly the file a
+ * previous decode failure named — by the same id shown in the
+ * overlay/logged to console.
+ */
+async function fetchPhotoByWaId(waId) {
+  const { data: waRows, error: waError } = await supabaseClient.from("wa").select("id, id_hash").eq("id", waId).limit(1);
+
+  if (waError) throw waError;
+  const waRow = waRows && waRows[0];
+  if (!waRow) throw new Error(`No wa row found for id ${waId}.`);
+  if (!waRow.id_hash) throw new Error(`wa row ${waId} has no id_hash.`);
+
+  return fetchPhotoByWaRow(waRow);
+}
+
+/**
+ * Shared tail end for both fetchRandomPhoto() and fetchPhotoByWaId()
+ * above: given a `wa` row (just its `id` and `id_hash`), fetches the
+ * joined `hashes` row and attaches the wa `id` — not `id_hash` — as
+ * `meta.waId`, since `id` is what's actually shown on screen and
+ * logged (id_hash is only ever used internally, as the join key).
+ */
+async function fetchPhotoByWaRow(waRow) {
+  const { data: hashRows, error: hashError } = await supabaseClient
+    .from("hashes")
+    .select("filename, location, location_name, timestamp")
+    .eq("id", waRow.id_hash)
+    .limit(1);
+
+  if (hashError) throw hashError;
+  const meta = hashRows && hashRows[0];
+  if (!meta) throw new Error(`No hashes row found for wa id ${waRow.id} (id_hash ${waRow.id_hash}).`);
+
+  meta.waId = waRow.id;
+  // Logged at fetch time (not render time) so that if anything later
+  // in the pipeline throws — HEIC decode, geocoding, whatever — the
+  // console already shows which photo was in flight, right above the
+  // error. Covers both the random path and debugShowPhoto(), since
+  // both funnel through this one function.
+  console.log(`Fetched wa id ${waRow.id} — ${meta.filename}`);
+  return meta;
+}
+
+/**
  * Picks one random eligible row from `wa` and returns its joined
  * metadata from `hashes`. PostgREST's query builder has no direct
  * "order by random()", so this is a count-then-random-offset pair of
@@ -240,7 +291,7 @@ async function fetchRandomPhoto() {
 
   const { data: waRows, error: waError } = await supabaseClient
     .from("wa")
-    .select("id_hash")
+    .select("id, id_hash")
     .not("id_hash", "is", null)
     .eq("processed", true)
     .in("filetype", CONFIG.IMAGE_FILETYPES)
@@ -248,20 +299,10 @@ async function fetchRandomPhoto() {
     .range(offset, offset);
 
   if (waError) throw waError;
-  const idHash = waRows && waRows[0] && waRows[0].id_hash;
-  if (!idHash) throw new Error("Random wa row had no id_hash.");
+  const waRow = waRows && waRows[0];
+  if (!waRow || !waRow.id_hash) throw new Error("Random wa row had no id_hash.");
 
-  const { data: hashRows, error: hashError } = await supabaseClient
-    .from("hashes")
-    .select("filename, location, location_name, timestamp")
-    .eq("id", idHash)
-    .limit(1);
-
-  if (hashError) throw hashError;
-  const meta = hashRows && hashRows[0];
-  if (!meta) throw new Error(`No hashes row found for id_hash ${idHash}.`);
-
-  return meta;
+  return fetchPhotoByWaRow(waRow);
 }
 
 /**
@@ -277,11 +318,13 @@ function parseLocationName(raw) {
     .map((line) => line.trim())
     .filter(Boolean);
   const name = lines[0] || "";
-  // Google Photos shows this literal placeholder when a photo has no
-  // location tagged at all — it's not a real place name, so treat it
-  // the same as an empty field (formatLocation falls back to coords,
-  // then to nothing).
-  if (name.toLowerCase() === "add a location") return "";
+  const lower = name.toLowerCase();
+  // Google Photos shows "Add a location" when nothing's tagged, and
+  // some rows carry the literal string "Unknown location" — neither
+  // is a real place name, so treat both the same as an empty field
+  // (formatLocation falls back to reverse-geocoded coords, then to
+  // nothing).
+  if (lower === "add a location" || lower === "unknown location") return "";
   return name;
 }
 
@@ -308,12 +351,19 @@ function parseMapsCoords(raw) {
  *     sends automatically instead, which does identify this app's own
  *     domain — the commonly-accepted workaround for browser-side
  *     Nominatim usage.
- * `geocodeCache` is keyed to ~100m buckets (3 decimal places) since
- * many photos taken near each other resolve to the same place name —
- * this avoids a repeat request every time, not just within one prefetch
- * batch but for the lifetime of the app.
+ * `zoom=18` (confirmed against Nominatim's own docs) asks for
+ * building-level detail — their highest. `extractPlaceName()` then
+ * picks the most specific level actually present in the response
+ * (a named feature, then a street address, then a neighbourhood,
+ * falling back to city/country) rather than only ever reading the
+ * city-level fields.
+ * `geocodeCache` is keyed to ~11m buckets (4 decimal places) — tight
+ * enough that neighboring buildings/streets don't collide and share a
+ * cached name now that results are this specific, while still
+ * deduping near-identical GPS readings (a few meters of jitter) from
+ * repeated shots at the same spot.
  */
-const geocodeCache = new Map(); // "lat,lng" (3dp) -> place name string | null
+const geocodeCache = new Map(); // "lat,lng" (4dp, ~11m) -> place name string | null
 const GEOCODE_MIN_INTERVAL_MS = 1100;
 let lastGeocodeAt = 0;
 let geocodeChain = Promise.resolve();
@@ -325,14 +375,27 @@ function sleep(ms) {
 function extractPlaceName(nominatimJson) {
   const address = nominatimJson && nominatimJson.address;
   if (!address) return null;
-  const locality = address.city || address.town || address.village || address.municipality || address.suburb || address.county;
-  const country = address.country;
-  if (locality && country) return `${locality}, ${country}`;
-  return locality || country || null;
+
+  // Every level Nominatim returned, most specific first — not just
+  // the single most specific one. Per-level values, most to least
+  // specific:
+  const name = nominatimJson.name || null; // a landmark/business/named road, if the coordinate resolved to one
+  const street = [address.house_number, address.road].filter(Boolean).join(" ") || null;
+  const neighborhood = address.neighbourhood || address.suburb || address.quarter || null;
+  const city = address.city || address.town || address.village || address.municipality || null;
+  const country = address.country || null;
+
+  // Joined together and deduplicated (a level can repeat another —
+  // e.g. a city-state where `city` and `country` come back the same)
+  // rather than picking just one.
+  const parts = [name, street, neighborhood, city, country].filter(Boolean);
+  const deduped = parts.filter((part, i) => parts.indexOf(part) === i);
+
+  return deduped.length ? deduped.join(", ") : null;
 }
 
 function reverseGeocode(coords) {
-  const key = `${coords.lat.toFixed(3)},${coords.lng.toFixed(3)}`;
+  const key = `${coords.lat.toFixed(4)},${coords.lng.toFixed(4)}`;
   if (geocodeCache.has(key)) return Promise.resolve(geocodeCache.get(key));
 
   const run = async () => {
@@ -342,7 +405,7 @@ function reverseGeocode(coords) {
 
     try {
       const res = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${coords.lat}&lon=${coords.lng}&zoom=10&addressdetails=1`
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${coords.lat}&lon=${coords.lng}&zoom=18&addressdetails=1`
       );
       if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
       const place = extractPlaceName(await res.json());
@@ -738,7 +801,7 @@ async function renderPhoto(meta) {
   hiddenLayer.src = url;
   el.overlayDate.textContent = formatTimestamp(meta);
   el.overlayLocation.textContent = formatLocation(meta);
-  el.overlayFilename.textContent = CONFIG.SHOW_FILENAME_OVERLAY ? meta.filename : "";
+  el.overlayFilename.textContent = CONFIG.SHOW_FILENAME_OVERLAY ? `${meta.waId} — ${meta.filename}` : "";
 
   // Crossfade: fade the new layer in, fade the old one out, then swap roles.
   hiddenLayer.classList.add("visible");
@@ -978,6 +1041,53 @@ function suppressScreenSaverViaLuna() {
     console.error("Screensaver suppression failed to register:", e);
   }
 }
+
+/* ============================================================
+ * DEBUGGING — console helpers, callable from ares-inspect
+ * ============================================================ */
+
+/**
+ * Pulls up one specific photo by its wa id (`wa.id` — the value shown
+ * in the on-screen overlay and logged by fetchPhotoByWaRow() whenever
+ * any photo is fetched — NOT id_hash, which stays internal) and
+ * displays it immediately, bypassing the normal random selection.
+ * Looks the row up in `wa` first to resolve its id_hash, then
+ * continues exactly like the random path from there (see
+ * fetchPhotoByWaId()). For re-inspecting exactly the file a previous
+ * console error named, without waiting for random chance to show it
+ * again.
+ *
+ * Call from the ares-inspect console with whatever value the on-screen
+ * overlay or a console log line showed for that photo's wa id — e.g.
+ * `debugShowPhoto(4821)` (check the overlay/console for the actual
+ * value and type; it's whatever `wa.id`'s column type is).
+ *
+ * This is a one-off preview, not a queue operation: it doesn't touch
+ * `history` or `upcoming`, so Left/Right browsing and the prefetch
+ * queue are unaffected, and the normal slide timer will move on to
+ * whatever's next in `upcoming` at its next interval as usual — this
+ * just paints one photo in the meantime.
+ */
+window.debugShowPhoto = function debugShowPhoto(waId) {
+  return (async () => {
+    const meta = await fetchPhotoByWaId(waId);
+    const coords = parseMapsCoords(meta.location);
+    await Promise.all([
+      resolveAndPreload(meta),
+      coords
+        ? reverseGeocode(coords).then((place) => {
+            meta.geocodedPlace = place;
+          })
+        : Promise.resolve(),
+    ]);
+    await renderPhoto(meta);
+    console.log(`[debugShowPhoto] Rendered wa id ${meta.waId} — ${meta.filename}.`);
+    return meta;
+  })().catch((err) => {
+    console.error(`[debugShowPhoto] Failed for wa id ${waId}:`, err);
+    throw err;
+  });
+};
 
 /* ============================================================
  * BOOT SEQUENCE
