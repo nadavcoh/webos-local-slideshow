@@ -9,11 +9,13 @@ summarizes *why* things are built the way they are — the README covers
 
 An ambient photo slideshow for an LG webOS 4K TV, pulling from a
 personal photo database rather than a live Google Photos album. Dark
-16:9 "lean-back" UI, 15s crossfades, timestamp + location overlay
-(plus an optional filename overlay, on by default — see
-`CONFIG.SHOW_FILENAME_OVERLAY`, mainly useful while debugging).
-Deployed via a GitHub Action that packages the app and pushes it to
-the TV over Tailscale.
+16:9 "lean-back" UI, 15s crossfades, timestamp + full-detail location
+overlay (name/street/neighbourhood/city/country, all levels Nominatim
+returns — see "Reverse geocoding is deliberately maximal" below), plus
+an optional wa-id + filename overlay, on by default — see
+`CONFIG.SHOW_FILENAME_OVERLAY`, mainly useful while debugging (also
+see `window.debugShowPhoto()`, below). Deployed via a GitHub Action
+that packages the app and pushes it to the TV over Tailscale.
 
 ## Architecture, and why it isn't the Google Photos thing anymore
 
@@ -204,6 +206,34 @@ for "has idle time to spare" than "wins a benchmark."
 - `CONFIG.HEIC_JPEG_QUALITY` (0.9) is the only tuning knob — lower it
   if decoded blob sizes/memory ever become a concern; there's no
   reason to expect they will at one photo every 15s.
+- **`heicSignatureError()`** runs right after the raw bytes are
+  fetched, before they're handed to the worker — it checks for the
+  ISO-BMFF `ftyp` box at offset 4 and, if it's missing, throws with a
+  guess at what the bytes actually are (JPEG/PNG/HTML/empty/other)
+  plus a hex dump, rather than letting libheif's much less legible
+  internal parse error ("No 'ftyp' box...") be the only signal. Added
+  after a real HEIC-named file failed to decode for reasons that
+  turned out to need this diagnostic to even start narrowing down.
+
+## Debugging console helpers
+
+`window.debugShowPhoto(waId)` — callable directly from the
+`ares-inspect` console — fetches one specific photo by its `wa.id`
+(see fetchPhotoByWaId() in Step B) and renders it immediately,
+bypassing the normal random selection. Every fetched photo (random or
+debug) logs `Fetched wa id <id> — <filename>` via
+`fetchPhotoByWaRow()`, so a failure anywhere downstream (HEIC decode,
+geocoding) has that line sitting right above it in the console,
+telling you which photo to re-pull with `debugShowPhoto()`. It's a
+one-off preview only — doesn't touch `history`/`upcoming`, so it
+doesn't disturb Left/Right navigation or the prefetch queue, and the
+normal slide timer moves on as usual at its next interval regardless.
+
+If a future session adds more debug affordances, keep them console
+functions on `window` in this same spot rather than UI (buttons, a
+debug overlay) — this app has no on-screen chrome beyond the overlay
+and the remote-control menu, and `ares-inspect` is already the
+established way anyone debugging this actually interacts with it.
 
 ## App icon (personal photo, kept out of the repo)
 
@@ -316,15 +346,31 @@ structured even though the specific APIs are gone:
   `api/auth/`, don't forget it there too.
 - **PostgREST has no `order by random()`** via the query builder —
   `fetchRandomPhoto()` in the new `app.js` does count-then-offset
-  instead (two round trips). If this ever needs to become one round
-  trip, that's a Postgres RPC function, not a query-builder trick —
-  matches the RPC pattern `photo-match-next` already uses for its own
-  distance queries.
-- **`hashes.location_name` has a literal `"Add a location"` placeholder**
-  Google Photos shows when nothing's tagged — `parseLocationName()`
-  treats that string as empty rather than displaying it. If a similar
-  placeholder ever shows up in a different casing/wording, extend that
-  same check rather than adding a second one elsewhere.
+  instead (two round trips). It selects both `id` (the `wa` table's
+  own primary key — what's shown/logged, see the "wa id vs id_hash"
+  note below) and `id_hash` (the join key to `hashes`) in the same
+  query, so no separate lookup is needed for the random path. If this
+  ever needs to become one round trip, that's a Postgres RPC function,
+  not a query-builder trick — matches the RPC pattern
+  `photo-match-next` already uses for its own distance queries.
+- **`wa.id` vs `wa.id_hash` — don't conflate these.** `id` is the
+  table's own primary key and is what's shown in the overlay, logged
+  to console, and what `debugShowPhoto()` takes. `id_hash` is purely
+  an internal join key to `hashes.id` and is never shown anywhere.
+  `fetchPhotoByWaRow(waRow)` is the one place that turns a `{id,
+  id_hash}` pair into a full `meta` (with `meta.waId = waRow.id`) —
+  both `fetchRandomPhoto()` and `fetchPhotoByWaId()` (used by
+  `debugShowPhoto()`) funnel through it, so logging/display stays
+  consistent between the two paths. This got mixed up once already —
+  an earlier version used `id_hash` for the on-screen "wa id" — so if
+  it comes up confused again, this is the fix to reapply, not a new
+  problem to solve from scratch.
+- **`hashes.location_name` has two literal placeholder values** —
+  `"Add a location"` (Google Photos, when nothing's tagged) and
+  `"Unknown location"`. `parseLocationName()` treats both as empty
+  rather than displaying them. If a similar placeholder ever shows up
+  in a different casing/wording, extend that same check rather than
+  adding a second one elsewhere.
 - **Reverse geocoding must not block rendering.** `formatLocation()` is
   synchronous on purpose — the actual Nominatim network call
   (`reverseGeocode()`) only ever happens inside `fetchAndPreloadOne()`,
@@ -333,6 +379,20 @@ structured even though the specific APIs are gone:
   `renderPhoto()`/`formatLocation()` even for a "quick fix" — that
   would reintroduce exactly the latency the prefetch queue exists to
   avoid.
+- **Reverse geocoding is deliberately maximal, not "smart."**
+  `zoom=18` (confirmed against Nominatim's own docs — 0-18, 18 is
+  building-level and is actually their own default) asks for the most
+  detail Nominatim will give. `extractPlaceName()` then concatenates
+  *every* level that came back — a named feature, street address,
+  neighbourhood/suburb, city, country — deduplicated, rather than
+  picking just the most specific one. This was a deliberate, explicit
+  ask ("always show all available data"), not an oversight — don't
+  simplify it back down to a single "best" level without checking
+  first. `geocodeCache`'s bucket size was tightened from ~100m to
+  ~11m (4 decimal places) specifically because of this: at 100m,
+  neighboring buildings/streets could share one cached result, which
+  was harmless when results were only ever city-level but would be
+  actively wrong now that they're this specific.
 - **`preloadImage(photoImageUrl(meta))` alone doesn't work for every
   photo** — some `wa`/`hashes` rows are HEIC files, which no webOS
   Chromium build decodes natively. See "HEIC photos" above; don't
@@ -347,6 +407,16 @@ structured even though the specific APIs are gone:
   exact error resurfaces, it's almost certainly a new call site
   constructing `HeifDecoder` from the raw `libheif` global again
   instead of going through one of those two functions.
+- **"No 'ftyp' box" from inside the WASM decoder** means the bytes
+  handed to libheif weren't a valid HEIF container at all — not a
+  libheif bug, and not necessarily the LAN server's fault either.
+  `heicSignatureError()` in `resolvePhotoDisplayUrl()` checks for this
+  *before* the fetched bytes ever reach the worker, and logs a
+  specific guess (JPEG/PNG/HTML/empty body/genuinely unrecognized,
+  with a hex dump) instead of just letting the opaque parse error
+  through. If this fires, the diagnostic message itself says what to
+  look at next — resist the urge to add a second, different check
+  elsewhere; extend this one instead.
 - **Nominatim throttling is app-wide, not per-caller** — `geocodeChain`
   serializes every `reverseGeocode()` call through one queue regardless
   of how many photos are being prefetched concurrently. If a second,

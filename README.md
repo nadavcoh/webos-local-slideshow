@@ -446,11 +446,18 @@ diverged from a "textbook" version in a few deliberate ways:
 - **Reverse geocoding** (coords → place name) uses Nominatim's free
   public API — no API key needed, but it's meant for light,
   non-bulk use. Requests are already throttled app-wide to roughly one
-  per second and cached by coordinate, so normal use (one TV, one
-  photo every 15s) stays well within their usage policy without any
-  extra configuration. If this ever gets reused somewhere with much
-  higher request volume, that throttling assumption should be
-  revisited.
+  per second and cached by coordinate (~11m buckets), so normal use
+  (one TV, one photo every 15s) stays well within their usage policy
+  without any extra configuration. If this ever gets reused somewhere
+  with much higher request volume, that throttling assumption should
+  be revisited. The location shown is deliberately maximal, not just
+  the nearest city: every level Nominatim returns for a coordinate —
+  a named landmark/business, street address, neighbourhood/suburb,
+  city, country — is shown together (e.g. "Central Perk, 90 Bedford
+  St, Greenwich Village, New York, USA"), not just the single most
+  specific one. In areas with sparse OpenStreetMap data you may still
+  only get city/country back — that's Nominatim finding the nearest
+  indexed feature, not a bug in how this app asks for it.
 - **Pairing timeout**: `CONFIG.PAIRING_POLL_TIMEOUT_MS` (10 minutes) —
   how long the TV waits overall for the phone to finish sign-in. This
   is separate from the KV handoff record's own 5-minute TTL (in
@@ -467,11 +474,18 @@ diverged from a "textbook" version in a few deliberate ways:
   automatic based on filename extension. `CONFIG.HEIC_JPEG_QUALITY`
   (0.9) is the one tuning knob, if decoded file sizes ever matter.
 - **Filename overlay**: `CONFIG.SHOW_FILENAME_OVERLAY` (default `true`)
-  shows the current photo's filename as a small line under the
-  date/location overlay — handy for matching what's on screen against
-  `ares-inspect`/LAN-server logs while debugging, but it's a raw
-  filename rather than "ambient" content. Flip to `false` once you're
-  not actively troubleshooting.
+  shows the current photo's `wa.id` and filename as a small line under
+  the date/location overlay — handy for matching what's on screen
+  against `ares-inspect`/LAN-server logs while debugging, but it's raw
+  debug info rather than "ambient" content. Flip to `false` once
+  you're not actively troubleshooting.
+- **Debugging a specific photo**: open the `ares-inspect` console and
+  run `debugShowPhoto(<wa.id>)` (the id shown in the filename overlay,
+  or logged to console every time any photo is fetched) to pull up
+  that exact photo immediately instead of waiting for random chance to
+  show it again. It's a one-off preview — doesn't affect Left/Right
+  history or the prefetch queue, and the slideshow moves on normally
+  at its next interval.
 - webOS's browser engine is Chromium-based and modern enough for all the
   `fetch`/`async`/`URLSearchParams` used here, but if you're targeting a
   very old webOS 4 firmware revision, test on the actual TV early —
