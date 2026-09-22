@@ -96,28 +96,48 @@ def main():
 
     for filename, group in by_filename.items():
         candidates = _candidates(filename)
-        print(f"=== {filename} ({len(candidates)} file(s) on disk, {len(group)} wa row(s)) ===")
-        if len(candidates) != len(group):
-            print(f"  ! mismatch: {len(candidates)} files but {len(group)} db rows - "
-                  f"investigate before trusting this group")
+        # Two wa rows can legitimately share one hash_id (two messages
+        # matched to the same Google Photos item) - that's not a real
+        # collision to resolve, both correctly get the same one file. What
+        # actually needs one file per photo is distinct hash_ids, not raw
+        # wa-row count.
+        distinct_hash_ids = {row["hash_id"] for row in group}
+        print(f"=== {filename} ({len(candidates)} file(s) on disk, {len(group)} wa row(s), "
+              f"{len(distinct_hash_ids)} distinct photo(s)) ===")
+        if len(candidates) != len(distinct_hash_ids):
+            print(f"  ! mismatch: {len(candidates)} file(s) but {len(distinct_hash_ids)} distinct "
+                  f"photo(s) (by hash_id) in this group - investigate before trusting this group")
 
         assigned = {}
         for row in group:
-            if row["timestamp"] is None:
+            if len(candidates) == 1:
+                # Mirrors _resolve()'s own shortcut: with only one file on
+                # disk, the real server serves it regardless of EXIF - no
+                # point reporting "NO MATCH" just because a lone candidate's
+                # EXIF was unreadable (HEIC without pillow-heif, e.g.).
+                winner, delta = candidates[0], None
+            elif row["timestamp"] is None:
                 print(f"  wa_id={row['wa_id']} hash_id={row['hash_id']} -> NO TIMESTAMP in hashes row")
                 continue
-            winner, delta = _best_match(candidates, row["timestamp"])
-            days = f"{delta / 86400:.1f}d" if delta is not None else "n/a"
+            else:
+                winner, delta = _best_match(candidates, row["timestamp"])
+
+            if delta is not None:
+                days = f"{delta / 86400:.1f}d"
+            elif winner is not None:
+                days = "only candidate"
+            else:
+                days = "n/a"
             print(f"  wa_id={row['wa_id']} hash_id={row['hash_id']} "
                   f"target={row['timestamp']} camera={row['camera_name']!r} "
                   f"-> {os.path.basename(winner) if winner else 'NO MATCH (no EXIF on any candidate)'} "
                   f"(delta {days})")
             if winner:
-                assigned.setdefault(winner, []).append(row["wa_id"])
+                assigned.setdefault(winner, set()).add(row["hash_id"])
 
-        for path, wa_ids in assigned.items():
-            if len(wa_ids) > 1:
-                print(f"  ! {os.path.basename(path)} claimed by multiple wa rows: {wa_ids}")
+        for path, hash_ids in assigned.items():
+            if len(hash_ids) > 1:
+                print(f"  ! {os.path.basename(path)} claimed by multiple distinct photos (hash_ids): {sorted(hash_ids)}")
         unclaimed = [c for c in candidates if c not in assigned]
         for c in unclaimed:
             print(f"  ! {os.path.basename(c)} not chosen by any wa row in this group")

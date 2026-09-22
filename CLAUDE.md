@@ -36,12 +36,16 @@ current architecture:
   photos already fetched, image-preloaded, and reverse-geocoded
   (coords → place name, via Nominatim) ahead of time, so skipping
   doesn't wait on a fresh round trip.
-- **Photo bytes**: an unauthenticated HTTP server on a machine in the
-  home LAN, serving files by filename. Not Supabase Storage, not
-  Backblaze — a local server, but not a *bare static* one anymore: it
-  also disambiguates duplicate filenames using `hash_id`, sent by the
-  TV app on every request. See "Duplicate filenames on the LAN photo
-  server" below.
+- **Photo bytes**: `server/photo_serve.py`, an unauthenticated HTTP
+  server on a machine in the home LAN, serving files by filename. Not
+  Supabase Storage, not Backblaze — a local server, but not a *bare
+  static* one anymore: it also disambiguates duplicate filenames using
+  `hash_id`, sent by the TV app on every request. Unlike the rest of
+  this repo, it talks to Postgres directly (`psycopg2` + its own
+  `server/config.json`, gitignored) rather than through Supabase's
+  PostgREST/anon-key layer — those are privileged credentials and
+  should never end up in `src/` or `webapp/`. See "Duplicate filenames
+  on the LAN photo server" below.
 - **TV-to-mobile auth handoff**: a small Next.js web app (separate
   deployment, in `webapp/` if pulled into this repo — see "Repo
   layout") with two API routes backed by Vercel KV:
@@ -94,6 +98,10 @@ webapp/                 ← separate Next.js/Vercel deployment, NOT packaged int
   app/api/auth/tv-poll/route.js      TV polls this for the tokens
   app/tv-login/page.js                mobile landing page, drives Supabase GitHub sign-in
   lib/                                 cors.js, uuid.js, supabaseClient.js
+server/                 ← LAN photo server, run manually on whichever machine holds the photos - NOT packaged/deployed by anything else in this repo
+  photo_serve.py           serves photo bytes; resolves wa.filename collisions via ?hash_id= (see "Duplicate filenames" below)
+  photo_serve_dryrun.py    read-only: reports every collision + what the resolver would pick, no server needed
+  config.json               (repo owner adds this, gitignored) direct Postgres credentials - same shape as phash's own config.json, NOT the Supabase anon key
 .github/workflows/deploy-webos.yml   ← package + Tailscale + install to TV
 pairing-backend/        ← RETIRED — superseded by webapp/api/auth/*, safe to delete
                            once the new flow is confirmed working end-to-end
@@ -245,8 +253,9 @@ change, no re-ingesting/re-scraping WhatsApp or Google Photos):
   appends it as `?hash_id=<id>` whenever present. Harmless to send for
   a `wa` row whose filename turns out to be unique — the server only
   acts on it when there's actually more than one candidate.
-- **Server**: the LAN photo server (`photo_serve.py`, in the `phash`
-  repo, replacing what used to be a bare `python -m http.server`) lists
+- **Server**: the LAN photo server (`server/photo_serve.py`, in this
+  repo, replacing what used to be a bare `python -m http.server`; see
+  "Photo server (`server/`)" in the README for setup) lists
   every on-disk file sharing the requested base name; if there's only
   one, it's served directly with no DB/EXIF work at all. If there's
   more than one, it looks up `hashes.timestamp`/`camera_name` for the
@@ -256,8 +265,11 @@ change, no re-ingesting/re-scraping WhatsApp or Google Photos):
   deliberately not needed. Resolutions are cached in a `dbm` file on
   disk (thousands of photos, nothing held in memory), keyed by
   `hash_id`, with a stored candidate count so a newly-added duplicate
-  (a later `album_wa.py` run) invalidates the cached answer instead of
-  silently going stale. `photo_serve_dryrun.py`, alongside it, reports
+  (a later `album_wa.py` run, in the separate `phash` repo — the file
+  that actually writes to `DOWNLOAD_TARGET_FOLDER` didn't move, only
+  the server that reads from it did) invalidates the cached answer
+  instead of silently going stale. `server/photo_serve_dryrun.py`,
+  alongside it, reports
   every collision group and what the resolver would pick without
   needing the TV app wired up — reuse that instead of re-deriving the
   matching logic if the picks ever need spot-checking again.
@@ -277,6 +289,27 @@ change, no re-ingesting/re-scraping WhatsApp or Google Photos):
   string, so rows that share a filename also share that timestamp; use
   `hashes.timestamp` (reached via `id_hash`) instead, which comes from
   Google Photos independently.
+- **`server/photo_serve.py` needs `pillow-heif`, not just Pillow.** WhatsApp
+  media includes HEIC files, and plain Pillow can't open them at all —
+  `Image.open()` raises "cannot identify image file", the same
+  underlying gap the TV app itself works around with `libheif` (see
+  "HEIC photos" above). Without `pillow_heif.register_heif_opener()`
+  called once at import time, every HEIC candidate in a collision group
+  silently fails its EXIF read and the resolver falls back to whichever
+  candidate happened to sort first — confirmed for real the first time
+  `photo_serve_dryrun.py` hit an actual `.HEIC` collision, before this
+  was added.
+- **Two `wa` rows can share the exact same `hash_id`.** This isn't a
+  filename collision to resolve at all — it's two messages independently
+  matched to the identical `hashes` row, so both *should* end up
+  pointing at the same single on-disk file, and do. The dry-run's
+  mismatch check compares candidate-file count against the number of
+  **distinct** `hash_id`s in a group, not raw row count, specifically
+  because of this — comparing against row count flags these as false
+  "missing file" errors. `_resolve()`'s own single-candidate shortcut
+  (serve the one file, skip EXIF entirely) already handles this case
+  correctly regardless; only the dry-run's *reporting* needed to catch
+  up to match it.
 
 ## Debugging console helpers
 
@@ -533,15 +566,16 @@ GitHub account").
 
 ## Open items / things a new session might need to pick up
 
-- **Deploy `photo_serve.py`** (in the `phash` repo) on the LAN machine
-  in place of the plain `python -m http.server` it's replacing — see
-  "Duplicate filenames on the LAN photo server" above. Until that swap
-  happens, `?hash_id=...` is sent but ignored (a bare static server
-  just serves whatever's literally at that path), so colliding `wa`
-  rows will keep unpredictably showing whichever file happens to sit at
-  the plain `name.jpg` path. Run `photo_serve_dryrun.py` against the
-  real folder/DB first to confirm the picks look right before cutting
-  over.
+- **Run `server/photo_serve.py`** on the LAN machine in place of the
+  plain `python -m http.server` it's replacing — see "Duplicate
+  filenames on the LAN photo server" above and the README's "Photo
+  server (`server/`)" section for setup (deps, `config.json`, which
+  constants to adjust). Until that swap happens, `?hash_id=...` is sent
+  but ignored (a bare static server just serves whatever's literally at
+  that path), so colliding `wa` rows will keep unpredictably showing
+  whichever file happens to sit at the plain `name.jpg` path. Run
+  `server/photo_serve_dryrun.py` against the real folder/DB first to
+  confirm the picks look right before cutting over.
 - Confirm the Supabase RLS policies on `wa`/`hashes` actually exist in
   the live database (see README.md) — without them the TV app fails
   silently (empty results, not an error).

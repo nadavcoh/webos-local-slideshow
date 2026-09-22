@@ -27,6 +27,11 @@ run), the entry is treated as stale and recomputed.
 
 No framework - built directly on http.server, same as the current
 `python -m http.server` this replaces.
+
+Needs `pillow-heif` in addition to Pillow/psycopg2 - WhatsApp media
+includes HEIC files, which plain Pillow can't open at all
+(`Image.open()` raises "cannot identify image file"), so EXIF reads
+would silently fail on every HEIC candidate without it.
 """
 
 import dbm
@@ -43,6 +48,16 @@ from datetime import datetime
 import psycopg2
 import psycopg2.extras
 from PIL import ExifTags, Image
+
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    # HEIC candidates will fail to read EXIF (Pillow alone can't open them -
+    # same underlying limitation the TV app itself works around with
+    # libheif, see CLAUDE.md's "HEIC photos" section). pip install
+    # pillow-heif to fix.
+    pass
 
 # --- adjust to match your setup -------------------------------------------
 DOWNLOAD_TARGET_FOLDER = r"C:\phash_album_downloads"  # matches album_wa.py
