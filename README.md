@@ -4,7 +4,7 @@
 
 This app shows an ambient, ever-changing slideshow on an LG webOS TV,
 pulling from a personal photo database rather than a live album on a
-photo-sharing service. Three pieces:
+photo-sharing service. Four pieces:
 
 - **`src/`** — the webOS TV app itself: plain HTML/CSS/JS, no build
   step. Shows a QR code for pairing, then a 15-second-crossfade
@@ -12,19 +12,23 @@ photo-sharing service. Three pieces:
 - **`webapp/`** — a small Next.js app (separate Vercel deployment) that
   handles the TV-to-mobile auth handoff: two API routes backed by
   Vercel KV, plus the mobile landing page the QR code points at.
+- **`server/`** — a small Python HTTP server that runs on a machine in
+  your home LAN and serves the actual photo bytes the TV displays. Not
+  packaged into the TV app or deployed anywhere — you run this
+  yourself, long-lived, on whatever machine already holds the photo
+  files.
 - **Supabase** — auth (GitHub SSO, restricted to one allowed email)
   and the photo database itself (`wa` + `hashes` tables, fed by a
   separate ingest project — not part of this repo).
 
-Photo bytes themselves come from a small HTTP server on a machine in
-your home LAN — not from Supabase Storage or any cloud photo service,
-and not a bare static file server either. `wa.filename` isn't
+Photo bytes come from `server/`, not from Supabase Storage or any cloud
+photo service, and not a bare static file server either — see "Photo
+server (`server/`)" below for what it does and why. `wa.filename` isn't
 unique (WhatsApp's own download naming collides), so duplicates land on
-that server as `name.jpg`, `name(1).jpg`, `name(2).jpg`, etc.; the TV
-app sends `?hash_id=<wa.id_hash>` alongside the filename so the server
-can pick the right one. See `CLAUDE.md`'s "Duplicate filenames on the
-LAN photo server" section for how that resolution works and where the
-server script itself lives.
+disk as `name.jpg`, `name(1).jpg`, `name(2).jpg`, etc.; the TV app sends
+`?hash_id=<wa.id_hash>` alongside the filename so the server can pick
+the right one — see `CLAUDE.md`'s "Duplicate filenames on the LAN photo
+server" section for exactly how that resolution works.
 
 > **Coming from an older checkout?** This app used to run on the
 > Google Photos Picker API via a `pairing-backend/` OAuth bridge.
@@ -49,6 +53,10 @@ webos-photos-slideshow/
 │   ├── vendor/libheif/               ← vendored WASM build of libheif used by heic-worker.js
 │   └── secrets.local.js.example     ← copy to secrets.local.js (gitignored) for local testing
 ├── .github/workflows/          ← GitHub Action: package + deploy to the TV over Tailscale
+├── server/                      ← LAN photo server — runs on a machine in your home LAN, NOT packaged/deployed by anything above
+│   ├── photo_serve.py             serves photo bytes; disambiguates duplicate filenames via ?hash_id= (see CLAUDE.md)
+│   ├── photo_serve_dryrun.py      read-only: reports every duplicate-filename group + what the resolver would pick, without running the server
+│   └── config.json                (you add this, gitignored) Postgres credentials — DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT, same shape as the phash ingest project's config.json
 ├── webapp/                      ← Next.js app — a SEPARATE Vercel deployment, never packaged into the TV app
 │   ├── app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + email
 │   ├── app/api/auth/tv-poll/route.js       TV polls this for the tokens
@@ -60,7 +68,61 @@ webos-photos-slideshow/
 Everything under `src/` is plain HTML/CSS/JS — no build step, no
 bundler — and is exactly the directory you hand to `ares-package`
 (`ares-package src`). `webapp/` is a normal Next.js app; deploy it to
-Vercel like any other.
+Vercel like any other. `server/` isn't deployed by either mechanism —
+it's a plain, long-running Python script you start yourself on
+whichever LAN machine holds the photo files; see "Photo server
+(`server/`)" below.
+
+## Photo server (`server/`)
+
+`server/photo_serve.py` is what the TV app's `PHOTO_SERVER_URL`
+actually points at. It replaces what used to be a bare
+`python -m http.server` because a bare static server can't handle
+`wa.filename` collisions — WhatsApp's own download naming isn't unique,
+so more than one photo can land on disk as `name.jpg`, `name(1).jpg`,
+`name(2).jpg`, etc. (see CLAUDE.md's "Duplicate filenames on the LAN
+photo server" for the full mechanism). Most requests are still served
+as plain static bytes with no extra work; the extra logic only runs for
+the filenames that actually collide.
+
+Setup, on whichever LAN machine holds the photo folder:
+
+1. **Dependencies**: `pip install psycopg2 Pillow pillow-heif`.
+   `pillow-heif` specifically — WhatsApp media includes HEIC files,
+   which plain Pillow can't open at all, so EXIF reads used for
+   disambiguation would silently fail on every HEIC candidate without
+   it.
+2. **`server/config.json`** (gitignored, you create this) — Postgres
+   credentials for a *direct* connection, not the Supabase anon key the
+   TV app uses:
+   ```json
+   {
+     "DB_NAME": "...",
+     "DB_USER": "...",
+     "DB_PASSWORD": "...",
+     "DB_HOST": "...",
+     "DB_PORT": "5432"
+   }
+   ```
+   Same shape as the `phash` ingest project's own `config.json` — this
+   is a privileged, LAN-only service reading `hashes` directly, so
+   these credentials should never end up in the TV app, `webapp/`, or
+   anything committed to the repo.
+3. **Adjust the constants at the top of `photo_serve.py`** —
+   `DOWNLOAD_TARGET_FOLDER` (where the photo files actually live) and
+   `PORT` (must match `CONFIG.PHOTO_SERVER_URL` in the TV app's
+   config — see section 2 below).
+4. **Run it**: `python server/photo_serve.py`. Keep it running
+   long-term (a scheduled task / systemd unit / equivalent) rather than
+   a one-off foreground process, the same way the old
+   `python -m http.server` presumably was.
+
+**`server/photo_serve_dryrun.py`** is a separate, read-only diagnostic
+— it reports every filename collision in the database and which file
+the resolver would pick, without starting a server or needing the TV
+app wired up. Run it manually (`python server/photo_serve_dryrun.py`,
+same `config.json` and folder) any time the duplicate-resolution logic
+or the underlying data changes enough to be worth spot-checking again.
 
 ## 0. Set up Supabase
 
