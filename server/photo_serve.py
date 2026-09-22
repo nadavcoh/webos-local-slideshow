@@ -60,7 +60,7 @@ except ImportError:
     pass
 
 # --- adjust to match your setup -------------------------------------------
-DOWNLOAD_TARGET_FOLDER = r"C:\phash_album_downloads"  # matches album_wa.py
+DOWNLOAD_TARGET_FOLDER = r"D:\Files\photos\wa"  # matches album_wa.py
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")  # same
                                                                         # DB_NAME/DB_USER/... shape as gphoto_selenium_v2.py
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "resolved_photos")
