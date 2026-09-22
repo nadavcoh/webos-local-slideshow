@@ -60,7 +60,7 @@ except ImportError:
     pass
 
 # --- adjust to match your setup -------------------------------------------
-DOWNLOAD_TARGET_FOLDER = r"D:\Files\photos\wa" # matches album_wa.py
+DOWNLOAD_TARGET_FOLDER = r"C:\phash_album_downloads"  # matches album_wa.py
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")  # same
                                                                         # DB_NAME/DB_USER/... shape as gphoto_selenium_v2.py
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "resolved_photos")
@@ -82,11 +82,16 @@ def _base_name(filename):
 def _candidates(filename):
     """On-disk files sharing filename's base name: for 'foo.jpg' that's
     whichever of foo.jpg, foo(1).jpg, foo(2).jpg, ... exist. No space
-    before the parenthesis, matching _unique_dest_path()'s f"{base}({n}){ext}"."""
+    before the parenthesis, matching _unique_dest_path()'s f"{base}({n}){ext}".
+    Case-insensitive on the extension: files on disk aren't consistently
+    cased (e.g. IMG_0421.HEIC vs IMG_0421(1).heic - same photo family,
+    different download source), and this must still find both."""
     base = _base_name(filename)
     stem, ext = os.path.splitext(base)
     pattern = os.path.join(DOWNLOAD_TARGET_FOLDER, glob.escape(stem) + "*" + glob.escape(ext))
-    exact_re = re.compile(r"^" + re.escape(stem) + r"(\(\d+\))?" + re.escape(ext) + r"$")
+    exact_re = re.compile(
+        r"^" + re.escape(stem) + r"(\(\d+\))?" + re.escape(ext) + r"$", re.IGNORECASE
+    )
     return sorted(
         f for f in glob.glob(pattern) if exact_re.match(os.path.basename(f))
     )
