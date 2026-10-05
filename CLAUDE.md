@@ -311,6 +311,26 @@ change, no re-ingesting/re-scraping WhatsApp or Google Photos):
   correctly regardless; only the dry-run's *reporting* needed to catch
   up to match it.
 
+## Live clock (current time + date)
+
+A top-right clock (`#clock` in `index.html`, `.clock*` in `style.css`)
+shows the *current* time and date, separate from the bottom-left
+overlay, which shows when the *photo* was taken. Don't merge the two or
+reuse `overlayDate` for it — they mean different things.
+
+- `startClock()`/`stopClock()`/`renderClock()` in `app.js`. `startClock()`
+  is called from `startSlideshow()` and is idempotent (clears any
+  existing interval first); `logOut()` calls `stopClock()` alongside
+  `clearInterval(slideTimer)` so nothing ticks behind the pairing QR.
+- Ticks every 1s rather than scheduling for the next minute boundary, so
+  a TV suspend/resume or system clock change can't leave it stale. The
+  text only actually changes once a minute.
+- Uses `toLocaleTimeString`/`toLocaleDateString` with `undefined` locale,
+  i.e. the TV's own locale + timezone settings (12h vs 24h, date order).
+  If the time is wrong on the TV, fix the TV's date/time/timezone
+  setting — nothing in this app sets it.
+- `CONFIG.SHOW_CLOCK` (default `true`) turns it off entirely.
+
 ## Debugging console helpers
 
 `window.debugShowPhoto(waId)` — callable directly from the

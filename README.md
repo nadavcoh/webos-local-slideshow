@@ -548,6 +548,11 @@ diverged from a "textbook" version in a few deliberate ways:
   against `ares-inspect`/LAN-server logs while debugging, but it's raw
   debug info rather than "ambient" content. Flip to `false` once
   you're not actively troubleshooting.
+- **Live clock**: `CONFIG.SHOW_CLOCK` (default `true`) shows the current
+  time and date in the top-right corner of the slideshow. It follows the
+  TV's own locale/timezone settings (so 12h vs 24h and date order match
+  the TV), and updates automatically. Set to `false` to hide it. See
+  CLAUDE.md's "Live clock" section.
 - **Debugging a specific photo**: open the `ares-inspect` console and
   run `debugShowPhoto(<wa.id>)` (the id shown in the filename overlay,
   or logged to console every time any photo is fetched) to pull up

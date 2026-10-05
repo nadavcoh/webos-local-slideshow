@@ -73,6 +73,11 @@ const CONFIG = {
   // date + location.
   SHOW_FILENAME_OVERLAY: true,
 
+  // Live clock (current time + date) in the top-right corner. Uses the
+  // TV's own locale and timezone settings, so 12h/24h and date order
+  // follow whatever the TV is set to. Set false to hide it entirely.
+  SHOW_CLOCK: true,
+
   // wa.filetype values considered "an image" — adjust here if the
   // actual stored values turn out to differ (see README.md note).
   IMAGE_FILETYPES: ["Image", "image/jpeg"],
@@ -117,6 +122,10 @@ const el = {
   overlayDate: document.getElementById("overlay-date"),
   overlayLocation: document.getElementById("overlay-location"),
   overlayFilename: document.getElementById("overlay-filename"),
+
+  clock: document.getElementById("clock"),
+  clockTime: document.getElementById("clock-time"),
+  clockDate: document.getElementById("clock-date"),
 
   menuOverlay: document.getElementById("menu-overlay"),
   menuLogout: document.getElementById("menu-logout"),
@@ -894,8 +903,39 @@ function goToPrevSlide() {
   restartSlideTimer();
 }
 
+/* ---------------------- Live clock ---------------------- */
+
+let clockTimer = null;
+
+function renderClock() {
+  const now = new Date();
+  el.clockTime.textContent = now.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  el.clockDate.textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+}
+
+/** Idempotent — safe to call every time the slideshow (re)starts. Ticks
+ *  every second rather than scheduling for the next minute boundary so a
+ *  TV suspend/resume or system clock change can never leave it stale;
+ *  the text only changes once a minute anyway. */
+function startClock() {
+  if (!CONFIG.SHOW_CLOCK) {
+    el.clock.classList.add("hidden");
+    return;
+  }
+  el.clock.classList.remove("hidden");
+  renderClock();
+  clearInterval(clockTimer);
+  clockTimer = setInterval(renderClock, 1000);
+}
+
+function stopClock() {
+  clearInterval(clockTimer);
+  clockTimer = null;
+}
+
 function startSlideshow() {
   showScreen("slideshow");
+  startClock();
   topUpQueue(); // fire-and-forget; fills in parallel with the first fetch below
   showNextSlide();
   restartSlideTimer();
@@ -914,6 +954,7 @@ function startSlideshow() {
  *  instead.) */
 async function logOut() {
   clearInterval(slideTimer);
+  stopClock();
   // `upcoming` is intentionally left alone here — those photos (and
   // any blob: URLs already decoded for them) are still valid and get
   // shown after re-pairing; `history` is what's actually discarded.
