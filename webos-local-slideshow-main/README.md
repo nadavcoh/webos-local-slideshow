@@ -1,0 +1,566 @@
+# Ambient Photos — webOS TV slideshow
+
+## Architecture
+
+This app shows an ambient, ever-changing slideshow on an LG webOS TV,
+pulling from a personal photo database rather than a live album on a
+photo-sharing service. Four pieces:
+
+- **`src/`** — the webOS TV app itself: plain HTML/CSS/JS, no build
+  step. Shows a QR code for pairing, then a 15-second-crossfade
+  slideshow with a timestamp + location overlay.
+- **`webapp/`** — a small Next.js app (separate Vercel deployment) that
+  handles the TV-to-mobile auth handoff: two API routes backed by
+  Vercel KV, plus the mobile landing page the QR code points at.
+- **`server/`** — a small Python HTTP server that runs on a machine in
+  your home LAN and serves the actual photo bytes the TV displays. Not
+  packaged into the TV app or deployed anywhere — you run this
+  yourself, long-lived, on whatever machine already holds the photo
+  files.
+- **Supabase** — auth (GitHub SSO, restricted to one allowed email)
+  and the photo database itself (`wa` + `hashes` tables, fed by a
+  separate ingest project — not part of this repo).
+
+Photo bytes come from `server/`, not from Supabase Storage or any cloud
+photo service, and not a bare static file server either — see "Photo
+server (`server/`)" below for what it does and why. `wa.filename` isn't
+unique (WhatsApp's own download naming collides), so duplicates land on
+disk as `name.jpg`, `name(1).jpg`, `name(2).jpg`, etc.; the TV app sends
+`?hash_id=<wa.id_hash>` alongside the filename so the server can pick
+the right one — see `CLAUDE.md`'s "Duplicate filenames on the LAN photo
+server" section for exactly how that resolution works.
+
+> **Coming from an older checkout?** This app used to run on the
+> Google Photos Picker API via a `pairing-backend/` OAuth bridge.
+> That's retired — see `CLAUDE.md`'s "History: the Google Photos era"
+> section if you're curious why it existed. `pairing-backend/` can be
+> deleted once you've confirmed the new flow below works end to end.
+
+## Directory layout
+
+```
+webos-photos-slideshow/
+├── .gitignore                ← ignores *secret* (see src/secrets.local.js below)
+├── src/                       ← everything ares-package hands to webOS — nothing else
+│   ├── appinfo.json            ← webOS app manifest
+│   ├── icon.png                 ← 80x80 app icon, generic placeholder (auto-generated from a real icon at build time if you've set up section d)
+│   ├── largeIcon.png             ← 130x130 app icon, generic placeholder — keep this as the placeholder, don't commit your real photo here (see README d)
+│   ├── largeIcon.png.gpg         ← (you add this) your real icon, GPG-encrypted — see README section (d)
+│   ├── index.html                ← markup for pairing screen + slideshow
+│   ├── style.css                  ← dark-mode lean-back styling, crossfade CSS
+│   ├── app.js                      ← Supabase/KV pairing client, wa/hashes fetching, slideshow engine
+│   ├── heic-worker.js               ← off-main-thread HEIC→JPEG decode (see CLAUDE.md "HEIC photos")
+│   ├── vendor/libheif/               ← vendored WASM build of libheif used by heic-worker.js
+│   └── secrets.local.js.example     ← copy to secrets.local.js (gitignored) for local testing
+├── .github/workflows/          ← GitHub Action: package + deploy to the TV over Tailscale
+├── server/                      ← LAN photo server — runs on a machine in your home LAN, NOT packaged/deployed by anything above
+│   ├── photo_serve.py             serves photo bytes; disambiguates duplicate filenames via ?hash_id= (see CLAUDE.md)
+│   ├── photo_serve_dryrun.py      read-only: reports every duplicate-filename group + what the resolver would pick, without running the server
+│   └── config.json                (you add this, gitignored) Postgres credentials — DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT, same shape as the phash ingest project's config.json
+├── webapp/                      ← Next.js app — a SEPARATE Vercel deployment, never packaged into the TV app
+│   ├── app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + email
+│   ├── app/api/auth/tv-poll/route.js       TV polls this for the tokens
+│   ├── app/tv-login/page.js                 mobile landing page, drives Supabase GitHub sign-in
+│   └── lib/                                  cors.js, uuid.js, supabaseClient.js
+└── pairing-backend/              ← RETIRED (Google Photos era) — safe to delete once confirmed unused
+```
+
+Everything under `src/` is plain HTML/CSS/JS — no build step, no
+bundler — and is exactly the directory you hand to `ares-package`
+(`ares-package src`). `webapp/` is a normal Next.js app; deploy it to
+Vercel like any other. `server/` isn't deployed by either mechanism —
+it's a plain, long-running Python script you start yourself on
+whichever LAN machine holds the photo files; see "Photo server
+(`server/`)" below.
+
+## Photo server (`server/`)
+
+`server/photo_serve.py` is what the TV app's `PHOTO_SERVER_URL`
+actually points at. It replaces what used to be a bare
+`python -m http.server` because a bare static server can't handle
+`wa.filename` collisions — WhatsApp's own download naming isn't unique,
+so more than one photo can land on disk as `name.jpg`, `name(1).jpg`,
+`name(2).jpg`, etc. (see CLAUDE.md's "Duplicate filenames on the LAN
+photo server" for the full mechanism). Most requests are still served
+as plain static bytes with no extra work; the extra logic only runs for
+the filenames that actually collide.
+
+Setup, on whichever LAN machine holds the photo folder:
+
+1. **Dependencies**: `pip install psycopg2 Pillow pillow-heif`.
+   `pillow-heif` specifically — WhatsApp media includes HEIC files,
+   which plain Pillow can't open at all, so EXIF reads used for
+   disambiguation would silently fail on every HEIC candidate without
+   it.
+2. **`server/config.json`** (gitignored, you create this) — Postgres
+   credentials for a *direct* connection, not the Supabase anon key the
+   TV app uses:
+   ```json
+   {
+     "DB_NAME": "...",
+     "DB_USER": "...",
+     "DB_PASSWORD": "...",
+     "DB_HOST": "...",
+     "DB_PORT": "5432"
+   }
+   ```
+   Same shape as the `phash` ingest project's own `config.json` — this
+   is a privileged, LAN-only service reading `hashes` directly, so
+   these credentials should never end up in the TV app, `webapp/`, or
+   anything committed to the repo.
+3. **Adjust the constants at the top of `photo_serve.py`** —
+   `DOWNLOAD_TARGET_FOLDER` (where the photo files actually live) and
+   `PORT` (must match `CONFIG.PHOTO_SERVER_URL` in the TV app's
+   config — see section 2 below).
+4. **Run it**: `python server/photo_serve.py`. Keep it running
+   long-term (a scheduled task / systemd unit / equivalent) rather than
+   a one-off foreground process, the same way the old
+   `python -m http.server` presumably was.
+
+**`server/photo_serve_dryrun.py`** is a separate, read-only diagnostic
+— it reports every filename collision in the database and which file
+the resolver would pick, without starting a server or needing the TV
+app wired up. Run it manually (`python server/photo_serve_dryrun.py`,
+same `config.json` and folder) any time the duplicate-resolution logic
+or the underlying data changes enough to be worth spot-checking again.
+
+## 0. Set up Supabase
+
+1. Create (or reuse) a Supabase project with GitHub added as an Auth
+   provider, and the `wa`/`hashes` tables already populated by your
+   ingest project.
+2. **Row Level Security** — the TV queries these tables using the
+   signed-in user's own token, not a service role key, so RLS needs an
+   explicit policy or every query will silently return zero rows:
+   ```sql
+   alter table wa enable row level security;
+   alter table hashes enable row level security;
+
+   create policy "allowed account can read wa"
+     on wa for select
+     to authenticated
+     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+
+   create policy "allowed account can read hashes"
+     on hashes for select
+     to authenticated
+     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+   ```
+3. Note your project's **URL** and **anon/public key** (Settings →
+   API) — needed by both `webapp/` and the TV app below. The anon key
+   is meant to be public/client-side; RLS above is the real access
+   control.
+4. **Auth → URL Configuration → Redirect URLs** — add
+   `https://<your-webapp>.vercel.app/tv-login` (and
+   `http://localhost:3000/tv-login` for local testing), or the mobile
+   sign-in page's OAuth redirect will be rejected.
+
+## 1. Deploy the web app (`webapp/`)
+
+Do this before configuring the TV app — the TV needs its URL.
+
+```bash
+cd webapp
+npm install
+```
+
+Attach a **Vercel KV** (Upstash Redis) database to the Vercel project
+— this auto-populates `KV_REST_API_URL`/`KV_REST_API_TOKEN`. Then set
+these Vercel environment variables:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `ALLOWED_EMAIL` (defaults to `cohen.n@gmail.com` if unset)
+
+Deploy (`vercel deploy` or connect the repo/subdirectory in the Vercel
+dashboard) and note the resulting `https://....vercel.app` URL.
+
+To test locally first: `npm run dev`, with a `.env.local` copied from
+`webapp/.env.example`. See `webapp/STEP1-NOTES.md` and
+`webapp/STEP2-NOTES.md` for manual `curl` walkthroughs of the
+handoff/poll endpoints and the sign-in page.
+
+## 2. Configure the TV app
+
+**If you're deploying via the GitHub Action (section 5 below), skip
+this** — leave the placeholders in `src/app.js` as-is; the workflow
+substitutes them from repo secrets at build time, and drops `vendor`
+into `appinfo.json` automatically too.
+
+For manual/local packaging, or for testing locally in a browser (see
+"Testing locally" below), copy `src/secrets.local.js.example` to
+`src/secrets.local.js` (already covered by `.gitignore`'s `*secret*`
+pattern — never committed, and excluded from the packaged `.ipk` too)
+and fill in:
+
+```js
+window.APP_CONFIG = {
+  WEBAPP_URL: "https://your-webapp.vercel.app",
+  SUPABASE_URL: "https://your-project.supabase.co",
+  SUPABASE_ANON_KEY: "your-anon-key",
+  PHOTO_SERVER_URL: "http://192.168.1.50:8080",
+};
+```
+
+`src/app.js` reads this at runtime — `window.APP_CONFIG` if present,
+otherwise its own placeholder strings (which is what the GitHub Action
+replaces for real builds).
+
+Also update `src/appinfo.json` → `"id"` to your own reverse-domain app
+ID (e.g. `com.yourname.ambientphotos`) if packaging manually — the
+GitHub Action sets this (and `vendor`) for you.
+
+## Testing locally in Chrome
+
+Since the TV app is plain static HTML/JS/CSS, you can preview the
+whole pairing + slideshow flow in a desktop browser before ever
+touching the TV or `ares-package`. From inside `src/`:
+
+```bash
+cd src
+npx serve .
+```
+
+Open the printed `http://localhost:...` URL in Chrome. Don't open
+`index.html` directly via `file://` — `fetch()` calls and the QR code
+renderer get blocked by browser security restrictions on that origin.
+(This `file://` restriction is specific to desktop Chrome — it doesn't
+apply on the real webOS TV, which is relevant if you're ever
+integrating this as a system screensaver via a `file://`-loading
+`WebEngineView` rather than through this local dev server.)
+
+Since webOS's browser is also Chromium-based under the hood, this is a
+genuinely useful proxy for what'll happen on the real TV — DevTools'
+Console/Network tabs during the flow are the easiest way to catch
+problems early. Run `webapp` locally too (`npm run dev` in that
+directory) if you want the full loop without touching production.
+
+## 3. Install the webOS CLI (on your dev machine, not the TV)
+
+```bash
+npm install -g @webos-tools/cli
+```
+
+(This project previously used the now-effectively-deprecated
+`@webosose/ares-cli` package — if you have that installed, uninstall it
+first to avoid two copies of `ares-*` commands shadowing each other on
+your `PATH`.)
+
+Put your TV into Developer Mode (install the **Developer Mode** app from
+the LG Content Store, enable it, note the IP address it shows), then
+register the TV as a deploy target:
+
+```bash
+ares-setup-device
+# follow the prompts: name it e.g. "livingroom-tv", enter its IP,
+# port 9922, and the passphrase shown in the Developer Mode app
+```
+
+## 4. Package and install
+
+```bash
+ares-package src --no-minify
+# produces com.yourdomain.ambientphotos_1.0.0_all.ipk
+
+ares-install -d livingroom-tv com.yourdomain.ambientphotos_1.0.0_all.ipk
+
+ares-launch -d livingroom-tv com.yourdomain.ambientphotos
+```
+
+`--no-minify` skips webOS's built-in minification step — mainly useful
+if you ever need to inspect the installed app's `app.js` on the TV
+itself (e.g. via `ares-shell`) and want it to still read like the
+source rather than a minified blob.
+
+To iterate quickly during development, `ares-install` again after each
+`ares-package` — no need to relaunch Developer Mode each time.
+
+### First run on the TV
+
+1. The app shows one QR code / link. Scan it (or open the link) on your
+   phone — it takes you to the web app's sign-in page, where you sign
+   in with the one allowed GitHub account.
+2. The slideshow starts automatically once sign-in completes.
+   Supabase's client library keeps the session valid on its own
+   (automatic token refresh), so a reboot skips pairing entirely —
+   until you explicitly Log Out from the on-screen remote menu, at
+   which point the same QR flow reappears.
+3. Each photo is fetched fresh from the `wa`/`hashes` tables — there's
+   no fixed "picked album" to run out of or need to refresh
+   periodically, unlike the old Google Photos Picker flow.
+
+## 5. Generating the TV pairing key
+
+Generate this once, locally, from a machine already on the same LAN as
+the TV (with Developer Mode open and its passphrase visible on-screen):
+
+```bash
+ares-setup-device --add livingroom-tv \
+  -i "host=<TV LAN IP>" -i "port=9922" -i "username=prisoner"
+ares-novacom --device livingroom-tv --getkey --passphrase <passphrase-shown-on-TV>
+```
+
+`@webos-tools/cli` writes the resulting key under
+`~/.ssh/livingroom-tv/webos_rsa` (this replaced the older
+`@webosose/ares-cli`'s `~/.novacom-cert/<name>/webos_rsa` path — if
+you're following an old note or blog post that mentions
+`.novacom-cert`, that's why it no longer matches).
+
+Base64-encode it for the `WEBOS_TV_SSH_KEY_B64` secret:
+
+**macOS:**
+```bash
+base64 -i ~/.ssh/livingroom-tv/webos_rsa | pbcopy
+```
+
+**Linux:**
+```bash
+base64 -w0 ~/.ssh/livingroom-tv/webos_rsa | xclip -selection clipboard
+# or just: base64 -w0 ~/.ssh/livingroom-tv/webos_rsa
+```
+
+**Windows (PowerShell):**
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.ssh\livingroom-tv\webos_rsa")) | clip
+```
+
+Developer Mode sessions expire after a couple of days unless extended in
+the Developer Mode app on the TV; the derived key stops working once the
+session lapses and you'll need to regenerate it via the commands above
+with a fresh passphrase.
+
+## 6. Automatic deploys via GitHub Actions (`.github/workflows/deploy-webos.yml`)
+
+The workflow packages the app, joins your tailnet, and pushes the result
+straight to the TV on every push to `main` that touches a file under
+`src/`. Set up these secrets first:
+
+### a) Tailscale reachability
+
+webOS has no Tailscale client, so the TV itself is never a tailnet node.
+The GitHub-hosted runner only reaches it if **one** of these is true:
+
+- A device already on your home LAN (a Pi, NAS, or router) is running
+  Tailscale as a **subnet router**:
+  ```bash
+  sudo tailscale up --advertise-routes=192.168.1.0/24   # use your TV's actual subnet
+  ```
+  then approve that route in the [Tailscale admin console](https://login.tailscale.com/admin/machines).
+- Or you self-host the Actions runner on a machine already on that LAN
+  (swap `runs-on: ubuntu-latest` for `runs-on: self-hosted` in the
+  workflow) — in that case the Tailscale step is optional.
+
+Create a Tailscale OAuth client (Admin console → Settings → OAuth clients)
+scoped to write devices with a tag (the workflow currently uses
+`tag:github-actions` — keep this in sync if you rename it), and add
+these repo secrets:
+- `TS_OAUTH_CLIENT_ID`
+- `TS_OAUTH_SECRET`
+
+> **Troubleshooting `403: calling actor does not have enough permissions`**
+> This means the OAuth client has the wrong scope. It needs **Auth Keys:
+> Write** specifically (a distinct entry from "Devices" or "OAuth
+> clients" in the scope picker — easy to pick the wrong one). Also make
+> sure your tag exists in your ACL policy's `tagOwners` block before you
+> try to scope the client to it:
+> ```json
+> "tagOwners": {
+>   "tag:github-actions": ["autogroup:admin"]
+> }
+> ```
+> and that the tag selected on the OAuth client matches the workflow's
+> `tags:` value exactly.
+
+### b) TV pairing key
+
+- `WEBOS_TV_SSH_KEY_B64` — from section 5 above
+- `WEBOS_TV_HOST` — the TV's LAN IP (reachable via the subnet route)
+- `TV_PASSPHRASE` — the Developer Mode passphrase shown on-screen at the
+  time you registered the device; used by `ares-setup-device` in the
+  workflow to re-establish trust non-interactively
+- `WEBOS_APP_ID` — your reverse-domain app ID (e.g.
+  `com.yourname.ambientphotos`); the workflow writes this into
+  `appinfo.json` → `"id"` at build time
+
+`appinfo.json` → `"vendor"` no longer needs a secret at all — the
+workflow drops in your GitHub username/org (`github.repository_owner`)
+automatically.
+
+### c) Web app / Supabase config
+
+Four repo secrets — the workflow writes all of them into `src/app.js`
+in place of the `CONFIG.WEBAPP_URL` / `CONFIG.SUPABASE_URL` /
+`CONFIG.SUPABASE_ANON_KEY` / `CONFIG.PHOTO_SERVER_URL` placeholders
+right before packaging:
+
+- `WEBAPP_URL` — e.g. `https://your-webapp.vercel.app` (no trailing
+  slash), from step 1
+- `SUPABASE_URL` — from step 0
+- `SUPABASE_ANON_KEY` — from step 0 (the anon/public key, not the
+  service role key)
+- `PHOTO_SERVER_URL` — e.g. `http://192.168.1.50:8080`
+
+If you're migrating an existing deployment, **remove** the old
+`PAIRING_BACKEND_URL` / `PAIRING_SHARED_SECRET` repo secrets — nothing
+references them anymore.
+
+### d) App icon — keeping it private
+
+If your icon is a personal photo (not something you want sitting in
+the repo in the clear, especially in a public repo), don't commit it
+as plaintext and don't try to base64-encode it into a repo secret
+either — GitHub Actions secrets are hard-capped at **48 KB**, which a
+130x130 PNG can exceed depending on export settings, and a secret
+isn't really the right place for something actually sensitive anyway
+(it'd still be sitting in GitHub's systems as your literal photo).
+
+Instead, this uses GitHub's own documented pattern for exactly this
+case: encrypt the file locally, commit the *encrypted* blob (safe even
+in a public repo — unreadable without the passphrase), and keep only
+the small passphrase as the Actions secret.
+
+One-time setup, on your own machine:
+
+```bash
+# Your real icon, exactly 130x130 (webOS's largeIcon size) — pick
+# whatever passphrase you want when prompted, and don't lose it.
+gpg --symmetric --cipher-algo AES256 \
+  --output src/largeIcon.png.gpg src/largeIcon.png
+
+git add src/largeIcon.png.gpg
+git commit -m "Add encrypted icon"
+git push
+```
+
+Then set the passphrase you were prompted for as the
+`ICON_DECRYPT_PASSPHRASE` repo secret (Settings → Secrets and
+variables → Actions). **Never commit the plaintext `src/largeIcon.png`
+once you've done this** — `git status` after running the command above
+should show only `largeIcon.png.gpg` as new/changed; leave the
+plaintext file untracked or restore the placeholder
+(`git checkout -- src/largeIcon.png`) before pushing.
+
+At deploy time, the workflow decrypts `src/largeIcon.png.gpg` back to
+`src/largeIcon.png` inside the CI runner only (never written back to
+the repo), validates it's a real 130x130 PNG, and generates
+`src/icon.png` (80x80) from it via a Lanczos-resampled downscale — a
+wrong passphrase or a corrupted/stale `.gpg` file fails the build
+loudly rather than silently shipping garbage. If `src/largeIcon.png.gpg`
+isn't in the repo, or `ICON_DECRYPT_PASSPHRASE` isn't set, this step
+is skipped and the committed generic placeholder ships instead — this
+is entirely optional.
+
+### Changes made to the default workflow, for future reference
+
+If you're picking this project back up after a while, the workflow has
+diverged from a "textbook" version in a few deliberate ways:
+
+- **`@webos-tools/cli`**, not `@webosose/ares-cli` — the latter is the
+  older, now largely unmaintained package name.
+- **Node 24** explicitly, plus `actions/checkout@v5` and
+  `actions/setup-node@v5` — both v4 majors only ran on the
+  now-deprecated Node 20 runtime.
+- **`tag:github-actions`** (not `tag:ci`) as the Tailscale ACL tag.
+- **Two reachability checks** back to back: `tailscale ping` (confirms
+  the tailnet route) and a plain `ping` (confirms the TV actually
+  responds on that address) — either can fail independently, so both
+  are kept as separate steps for clearer failure messages.
+- **`ares-setup-device` uses `-i key=value` flags** plus a
+  `TV_PASSPHRASE` secret, rather than a single JSON `--info` blob — this
+  lets the workflow re-establish the SSH trust relationship
+  non-interactively on a fresh runner every time, instead of assuming a
+  key generated once will always be accepted.
+- **`ares-setup-device --listfull`** right after registering — purely
+  diagnostic output in the log, useful when a deploy fails at the
+  install step and you need to confirm the device profile actually
+  registered correctly.
+- **`--no-minify`** on `ares-package` (see section 4 above).
+- **`icon.png` is decrypted-and-generated at build time, not committed
+  as final** — the real icon is a personal photo, so it's committed
+  only as a GPG-encrypted blob (`src/largeIcon.png.gpg`), with just
+  the decryption passphrase as a small Actions secret
+  (`ICON_DECRYPT_PASSPHRASE`) — see README section (d) for why (48 KB
+  secret cap, plus a real photo doesn't belong in a secret's cleartext
+  value either). The workflow decrypts it into `src/largeIcon.png`
+  inside the runner only, validates it (PNG signature + exact 130x130
+  dimensions), then downscales it with `sharp` to produce `src/icon.png`
+  (80x80). A wrong passphrase or malformed/wrong-size decrypted file
+  fails the build with a clear message instead of producing an `.ipk`
+  `ares-package` accepts but webOS might reject or mis-render. Missing
+  secret or missing `.gpg` file is a valid, supported state (keeps the
+  placeholder) — this isn't required like the secrets in section c.
+- **The relaunch step is commented out** — `ares-install` already
+  restarts a running app on install for this project's testing
+  workflow; uncomment `ares-launch` if your TV doesn't do this
+  automatically.
+- **`--app-exclude secrets.local.js` / `secrets.local.js.example`** on
+  the package step — belt-and-suspenders, since CI never has these
+  files anyway (gitignored), but keeps a stray local file from ever
+  ending up in a manually-built `.ipk` either.
+
+## Notes / things to adjust for your setup
+
+- **15-second crossfade timing** lives in `CONFIG.SLIDE_INTERVAL_MS` and
+  the CSS `--transition-duration` variable in `style.css`.
+- **History buffer size** (`CONFIG.HISTORY_MAX`, currently 50) controls
+  how far back manual Left-arrow "previous" navigation can go before
+  hitting the start of what's been shown this session.
+- **Prefetch depth** (`CONFIG.PREFETCH_DEPTH`, currently 3) controls how
+  many upcoming photos are kept already fetched + image-preloaded +
+  reverse-geocoded ahead of time, so skipping forward doesn't wait on a
+  fresh round trip. Raise it if you tend to skip faster than 3 photos'
+  worth of prefetching can keep up with; each unit costs one extra
+  Supabase query, one extra image load, and (if the photo has
+  coordinates) one extra Nominatim lookup done in advance.
+- **Reverse geocoding** (coords → place name) uses Nominatim's free
+  public API — no API key needed, but it's meant for light,
+  non-bulk use. Requests are already throttled app-wide to roughly one
+  per second and cached by coordinate (~11m buckets), so normal use
+  (one TV, one photo every 15s) stays well within their usage policy
+  without any extra configuration. If this ever gets reused somewhere
+  with much higher request volume, that throttling assumption should
+  be revisited. The location shown is deliberately maximal, not just
+  the nearest city: every level Nominatim returns for a coordinate —
+  a named landmark/business, street address, neighbourhood/suburb,
+  city, country — is shown together (e.g. "Central Perk, 90 Bedford
+  St, Greenwich Village, New York, USA"), not just the single most
+  specific one. In areas with sparse OpenStreetMap data you may still
+  only get city/country back — that's Nominatim finding the nearest
+  indexed feature, not a bug in how this app asks for it.
+- **Pairing timeout**: `CONFIG.PAIRING_POLL_TIMEOUT_MS` (10 minutes) —
+  how long the TV waits overall for the phone to finish sign-in. This
+  is separate from the KV handoff record's own 5-minute TTL (in
+  `webapp/app/api/auth/tv-handoff/route.js`), which only needs to
+  cover the gap between the phone finishing sign-in and the TV's next
+  poll — normally seconds.
+- **`wa.filetype` values**: `CONFIG.IMAGE_FILETYPES` currently filters
+  on `["image", "image/jpeg"]` per spec; run
+  `select distinct filetype from wa` against your actual data and
+  adjust if it stores something else.
+- **HEIC photos** decode to JPEG on the TV itself before display,
+  since webOS's Chromium can't render HEIC natively — see CLAUDE.md's
+  "HEIC photos" section for how and why. Nothing to configure; it's
+  automatic based on filename extension. `CONFIG.HEIC_JPEG_QUALITY`
+  (0.9) is the one tuning knob, if decoded file sizes ever matter.
+- **Filename overlay**: `CONFIG.SHOW_FILENAME_OVERLAY` (default `true`)
+  shows the current photo's `wa.id` and filename as a small line under
+  the date/location overlay — handy for matching what's on screen
+  against `ares-inspect`/LAN-server logs while debugging, but it's raw
+  debug info rather than "ambient" content. Flip to `false` once
+  you're not actively troubleshooting.
+- **Live clock**: `CONFIG.SHOW_CLOCK` (default `true`) shows the current
+  time and date in the top-right corner of the slideshow. It follows the
+  TV's own locale/timezone settings (so 12h vs 24h and date order match
+  the TV), and updates automatically. Set to `false` to hide it. See
+  CLAUDE.md's "Live clock" section.
+- **Debugging a specific photo**: open the `ares-inspect` console and
+  run `debugShowPhoto(<wa.id>)` (the id shown in the filename overlay,
+  or logged to console every time any photo is fetched) to pull up
+  that exact photo immediately instead of waiting for random chance to
+  show it again. It's a one-off preview — doesn't affect Left/Right
+  history or the prefetch queue, and the slideshow moves on normally
+  at its next interval.
+- webOS's browser engine is Chromium-based and modern enough for all the
+  `fetch`/`async`/`URLSearchParams` used here, but if you're targeting a
+  very old webOS 4 firmware revision, test on the actual TV early —
+  device-specific `fetch` quirks do occasionally show up.
