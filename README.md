@@ -135,6 +135,7 @@ or the underlying data changes enough to be worth spot-checking again.
    ```sql
    alter table wa enable row level security;
    alter table hashes enable row level security;
+   alter table location_names enable row level security;
 
    create policy "allowed account can read wa"
      on wa for select
@@ -145,7 +146,18 @@ or the underlying data changes enough to be worth spot-checking again.
      on hashes for select
      to authenticated
      using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+
+   -- hashes.location_name_id points into this small lookup table; the TV
+   -- embeds it (location_names(value)) to show the place name.
+   create policy "allowed account can read location_names"
+     on location_names for select
+     to authenticated
+     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
    ```
+   (`location_names` and the `hashes.lat` / `hashes.lon` / `location_name_id`
+   columns come from the photo-match-next "normalize columns" migration — the
+   TV app no longer reads `hashes.location` / `hashes.location_name`, which
+   that migration's final step drops.)
 3. Note your project's **URL** and **anon/public key** (Settings →
    API) — needed by both `webapp/` and the TV app below. The anon key
    is meant to be public/client-side; RLS above is the real access

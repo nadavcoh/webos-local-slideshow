@@ -10,7 +10,7 @@ foo(2).jpg, ... - the collision produced by album_wa.py's
 _unique_dest_path()), the client sends ?hash_id=<wa.id_hash> so this
 server can pick the right one:
 
-  1. Look up hashes.timestamp / hashes.camera_name for that hash_id
+  1. Look up hashes.timestamp for that hash_id
      (one query, hashes table only - the slideshow already has id_hash,
      so no wa lookup needed).
   2. Read EXIF DateTimeOriginal from each on-disk candidate.
@@ -125,7 +125,7 @@ def _hashes_row(hash_id):
     )
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT timestamp, camera_name FROM hashes WHERE id = %s", (hash_id,))
+        cur.execute("SELECT timestamp FROM hashes WHERE id = %s", (hash_id,))
         return cur.fetchone()
     finally:
         conn.close()
