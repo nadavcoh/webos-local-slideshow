@@ -1,0 +1,239 @@
+name: Deploy webOS Homebrew Repo to Vercel
+
+# Standalone workflow: builds the .ipk exactly like deploy-webos.yml does,
+# then publishes it (plus a generated apps.json) to Vercel behind HTTP
+# Basic Auth. It does NOT touch the TV and never commits apps.json.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - ".github/workflows/deploy-repo.yml"
+  workflow_dispatch: {}
+
+jobs:
+  deploy-repo:
+    runs-on: ubuntu-latest
+    env:
+      ICON_DECRYPT_PASSPHRASE: ${{ secrets.ICON_DECRYPT_PASSPHRASE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      # NOTE: the existing deploy-webos.yml installs the CLI from
+      # @webos-tools/cli (provides ares-package), which is the proven package.
+      - name: Install webOS CLI and Vercel CLI
+        run: npm install -g @webos-tools/cli vercel
+
+      # Same config injection as deploy-webos.yml, so the packaged app and
+      # its id match what gets installed on the TV.
+      - name: Inject config into app.js and appinfo.json
+        env:
+          WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          PHOTO_SERVER_URL: ${{ secrets.PHOTO_SERVER_URL }}
+          WEBOS_APP_ID: ${{ secrets.WEBOS_APP_ID }}
+          WEBOS_VENDOR: ${{ github.repository_owner }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const replacements = {
+              "https://YOUR-WEBAPP.vercel.app": process.env.WEBAPP_URL,
+              "https://YOUR-PROJECT.supabase.co": process.env.SUPABASE_URL,
+              "YOUR_SUPABASE_ANON_KEY": process.env.SUPABASE_ANON_KEY,
+              "http://YOUR-PHOTO-SERVER:PORT": process.env.PHOTO_SERVER_URL,
+            };
+            let js = fs.readFileSync("src/app.js", "utf8");
+            for (const [placeholder, value] of Object.entries(replacements)) {
+              if (!js.includes(placeholder)) {
+                console.error(`Placeholder not found in app.js: ${placeholder} — did CONFIG change?`);
+                process.exit(1);
+              }
+              js = js.split(placeholder).join(value);
+            }
+            fs.writeFileSync("src/app.js", js);
+          '
+          jq --arg id "$WEBOS_APP_ID" --arg vendor "$WEBOS_VENDOR" \
+            '.id = $id | .vendor = $vendor' src/appinfo.json > src/appinfo.json.tmp
+          mv src/appinfo.json.tmp src/appinfo.json
+
+      - name: Decrypt icon and generate icon.png
+        if: ${{ env.ICON_DECRYPT_PASSPHRASE != '' }}
+        run: |
+          if [ ! -f src/largeIcon.png.gpg ]; then
+            echo "ICON_DECRYPT_PASSPHRASE is set but src/largeIcon.png.gpg is missing. Keeping the placeholder icon."
+            exit 0
+          fi
+
+          gpg --quiet --batch --yes --decrypt \
+            --passphrase="$ICON_DECRYPT_PASSPHRASE" \
+            --output src/largeIcon.png \
+            src/largeIcon.png.gpg
+
+          npm install --no-save sharp
+          node -e '
+            const fs = require("fs");
+            const sharp = require("sharp");
+            (async () => {
+              const buf = fs.readFileSync("src/largeIcon.png");
+              const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+              if (buf.length < 24 || !buf.subarray(0, 8).equals(PNG_SIG)) {
+                throw new Error("Decrypted src/largeIcon.png is not a valid PNG — wrong ICON_DECRYPT_PASSPHRASE, or largeIcon.png.gpg is stale?");
+              }
+              const width = buf.readUInt32BE(16);
+              const height = buf.readUInt32BE(20);
+              if (width !== 130 || height !== 130) {
+                throw new Error(`Decrypted icon must be exactly 130x130 — got ${width}x${height}.`);
+              }
+              const small = await sharp(buf).resize(80, 80, { kernel: "lanczos3" }).png().toBuffer();
+              fs.writeFileSync("src/icon.png", small);
+              console.log(`Wrote src/icon.png (${small.length} bytes).`);
+            })().catch((err) => {
+              console.error(err.message || err);
+              process.exit(1);
+            });
+          '
+
+      - name: Package ipk
+        run: >
+          ares-package src
+          --no-minify
+          --app-exclude secrets.local.js
+          --app-exclude secrets.local.js.example
+
+      - name: Locate built ipk
+        id: ipk
+        run: |
+          IPK="$(ls ./*.ipk | head -n1)"
+          echo "path=$IPK" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$IPK")" >> "$GITHUB_OUTPUT"
+
+      # Generated in the runner workspace only; never committed.
+      - name: Generate apps.json from appinfo.json
+        env:
+          IPK_NAME: ${{ steps.ipk.outputs.name }}
+          IPK_PATH: ${{ steps.ipk.outputs.path }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          node - <<'EOF'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const info = JSON.parse(fs.readFileSync("src/appinfo.json", "utf8"));
+          const ipkName = process.env.IPK_NAME;
+          const ipkBuf = fs.readFileSync(process.env.IPK_PATH);
+          const sha256 = crypto.createHash("sha256").update(ipkBuf).digest("hex");
+
+          // Schema allows an http(s) URL or a data: URI for iconUri. Embedding avoids
+          // a second authenticated fetch for the icon.
+          let iconUri = "";
+          for (const f of ["src/icon.png", "src/largeIcon.png"]) {
+            if (fs.existsSync(f)) {
+              iconUri = "data:image/png;base64," + fs.readFileSync(f).toString("base64");
+              break;
+            }
+          }
+
+          const description = info.description || info.title;
+          const manifest = {
+            id: info.id,
+            version: info.version,
+            type: info.type || "web",
+            title: info.title,
+            appDescription: description,
+            iconUri,
+            sourceUrl: process.env.SOURCE_URL,
+            rootRequired: false,
+            ipkUrl: ipkName, // relative to apps.json
+            ipkSize: ipkBuf.length,
+            ipkHash: { sha256 },
+          };
+          const repo = {
+            paging: { page: 1, count: 1, maxPage: 1, itemsTotal: 1 },
+            packages: [{ id: info.id, title: info.title, iconUri, manifest }],
+          };
+          fs.writeFileSync("apps.json", JSON.stringify(repo, null, 2) + "\n");
+          console.log(JSON.stringify({ ...manifest, iconUri: iconUri ? "<data uri>" : "" }, null, 2));
+          EOF
+
+      - name: Assemble dist/
+        run: |
+          mkdir -p dist
+          mv "${{ steps.ipk.outputs.path }}" dist/
+          mv apps.json dist/
+
+      # Credentials are NOT embedded: they are read at runtime from the
+      # REPO_USERNAME / REPO_PASSWORD environment variables configured on
+      # the Vercel project.
+      - name: Generate Basic Auth middleware
+        run: |
+          cat > dist/middleware.js <<'EOF'
+          const enc = new TextEncoder();
+
+          // Constant-time comparison (no crypto.timingSafeEqual on the Edge runtime).
+          function safeEqual(a, b) {
+            const x = enc.encode(a);
+            const y = enc.encode(b);
+            let diff = x.length ^ y.length;
+            const n = Math.max(x.length, y.length);
+            for (let i = 0; i < n; i++) diff |= (x[i] || 0) ^ (y[i] || 0);
+            return diff === 0;
+          }
+
+          function unauthorized() {
+            return new Response("Authentication required", {
+              status: 401,
+              headers: { "WWW-Authenticate": 'Basic realm="webOS Repo", charset="UTF-8"' },
+            });
+          }
+
+          export default function middleware(request) {
+            const user = process.env.REPO_USERNAME;
+            const pass = process.env.REPO_PASSWORD;
+            // Fail closed if credentials are not configured.
+            if (!user || !pass) {
+              return new Response("Repository auth is not configured", { status: 500 });
+            }
+
+            const header = request.headers.get("authorization") || "";
+            const space = header.indexOf(" ");
+            if (space < 0 || header.slice(0, space).toLowerCase() !== "basic") {
+              return unauthorized();
+            }
+
+            let decoded;
+            try {
+              const bytes = Uint8Array.from(atob(header.slice(space + 1).trim()), (c) => c.charCodeAt(0));
+              decoded = new TextDecoder().decode(bytes);
+            } catch (e) {
+              return unauthorized();
+            }
+
+            const idx = decoded.indexOf(":");
+            if (idx < 0) return unauthorized();
+
+            const okUser = safeEqual(decoded.slice(0, idx), user);
+            const okPass = safeEqual(decoded.slice(idx + 1), pass);
+            if (okUser && okPass) {
+              // Equivalent to next(): continue to the static files.
+              return new Response(null, { headers: { "x-middleware-next": "1" } });
+            }
+            return unauthorized();
+          }
+
+          export const config = { matcher: "/:path*" };
+          EOF
+
+      - name: Deploy dist/ to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          cd dist
+          vercel deploy --prod --yes --token "$VERCEL_TOKEN"
