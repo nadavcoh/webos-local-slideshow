@@ -48,9 +48,10 @@ def _colliding_wa_rows():
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cur.execute("""
             SELECT wa.id AS wa_id, wa.id_hash AS hash_id,
-                   hashes.filename, hashes.timestamp, hashes.camera_name
+                   hashes.filename, hashes.timestamp, camera_names.value AS camera_name
             FROM wa
             JOIN hashes ON wa.id_hash = hashes.id
+            LEFT JOIN camera_names ON camera_names.id = hashes.camera_name_id
             WHERE wa.id_hash IS NOT NULL
               AND wa.processed = true
               AND wa.filetype IN ('Image', 'image/jpeg')

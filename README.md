@@ -135,6 +135,7 @@ or the underlying data changes enough to be worth spot-checking again.
    ```sql
    alter table wa enable row level security;
    alter table hashes enable row level security;
+   alter table location_names enable row level security;
 
    create policy "allowed account can read wa"
      on wa for select
@@ -145,7 +146,18 @@ or the underlying data changes enough to be worth spot-checking again.
      on hashes for select
      to authenticated
      using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+
+   -- hashes.location_name_id points into this small lookup table; the TV
+   -- embeds it (location_names(value)) to show the place name.
+   create policy "allowed account can read location_names"
+     on location_names for select
+     to authenticated
+     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
    ```
+   (`location_names` and the `hashes.lat` / `hashes.lon` / `location_name_id`
+   columns come from the photo-match-next "normalize columns" migration — the
+   TV app no longer reads `hashes.location` / `hashes.location_name`, which
+   that migration's final step drops.)
 3. Note your project's **URL** and **anon/public key** (Settings →
    API) — needed by both `webapp/` and the TV app below. The anon key
    is meant to be public/client-side; RLS above is the real access
@@ -548,6 +560,11 @@ diverged from a "textbook" version in a few deliberate ways:
   against `ares-inspect`/LAN-server logs while debugging, but it's raw
   debug info rather than "ambient" content. Flip to `false` once
   you're not actively troubleshooting.
+- **Live clock**: `CONFIG.SHOW_CLOCK` (default `true`) shows the current
+  time and date in the top-right corner of the slideshow. It follows the
+  TV's own locale/timezone settings (so 12h vs 24h and date order match
+  the TV), and updates automatically. Set to `false` to hide it. See
+  CLAUDE.md's "Live clock" section.
 - **Debugging a specific photo**: open the `ares-inspect` console and
   run `debugShowPhoto(<wa.id>)` (the id shown in the filename overlay,
   or logged to console every time any photo is fetched) to pull up

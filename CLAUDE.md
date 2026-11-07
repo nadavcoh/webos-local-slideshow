@@ -29,7 +29,8 @@ current architecture:
   `photo-match-next`).
 - **Photo data**: a `wa` table (photo metadata, one row per photo)
   joined against a `hashes` table (`wa.id_hash -> hashes.id`) for
-  filename, location, location_name, and timestamp. Same underlying
+  filename, location (`lat`/`lon`), the place name (`location_name_id` ->
+  `location_names.value`), and timestamp. Same underlying
   database/schema as the `photo-match-next` project — both are fed by
   a separate `phash` ingest repo, not by anything in this repo. A
   small forward queue (`CONFIG.PREFETCH_DEPTH`) keeps a few upcoming
@@ -258,7 +259,7 @@ change, no re-ingesting/re-scraping WhatsApp or Google Photos):
   "Photo server (`server/`)" in the README for setup) lists
   every on-disk file sharing the requested base name; if there's only
   one, it's served directly with no DB/EXIF work at all. If there's
-  more than one, it looks up `hashes.timestamp`/`camera_name` for the
+  more than one, it looks up `hashes.timestamp` for the
   given `hash_id`, reads EXIF `DateTimeOriginal` off each candidate,
   and serves whichever is closest in time — duplicates in this library
   are months apart, so "closest" is decisive; exact-match precision was
@@ -310,6 +311,26 @@ change, no re-ingesting/re-scraping WhatsApp or Google Photos):
   (serve the one file, skip EXIF entirely) already handles this case
   correctly regardless; only the dry-run's *reporting* needed to catch
   up to match it.
+
+## Live clock (current time + date)
+
+A top-right clock (`#clock` in `index.html`, `.clock*` in `style.css`)
+shows the *current* time and date, separate from the bottom-left
+overlay, which shows when the *photo* was taken. Don't merge the two or
+reuse `overlayDate` for it — they mean different things.
+
+- `startClock()`/`stopClock()`/`renderClock()` in `app.js`. `startClock()`
+  is called from `startSlideshow()` and is idempotent (clears any
+  existing interval first); `logOut()` calls `stopClock()` alongside
+  `clearInterval(slideTimer)` so nothing ticks behind the pairing QR.
+- Ticks every 1s rather than scheduling for the next minute boundary, so
+  a TV suspend/resume or system clock change can't leave it stale. The
+  text only actually changes once a minute.
+- Uses `toLocaleTimeString`/`toLocaleDateString` with `undefined` locale,
+  i.e. the TV's own locale + timezone settings (12h vs 24h, date order).
+  If the time is wrong on the TV, fix the TV's date/time/timezone
+  setting — nothing in this app sets it.
+- `CONFIG.SHOW_CLOCK` (default `true`) turns it off entirely.
 
 ## Debugging console helpers
 
@@ -466,7 +487,18 @@ structured even though the specific APIs are gone:
   reapply. Don't read the fix for that old bug as license to also drop
   `meta.hashId` or reuse `meta.waId` in its place — they now serve
   genuinely different purposes.
-- **`hashes.location_name` has two literal placeholder values** —
+- **Location columns are normalized (Nov 2026) — don't go back to the old
+  ones.** `hashes.location` (a Google Maps URL) and `hashes.location_name`
+  (text) were dropped from the database. `fetchPhotoByWaRow()` now selects
+  `filename, lat, lon, timestamp, location_names(value)` (a PostgREST embed
+  through `hashes.location_name_id`), flattens it into `meta.location_name`,
+  and `metaCoords(meta)` returns `{lat, lng}` from `meta.lat`/`meta.lon` (or
+  `null`) where `parseMapsCoords(meta.location)` used to be. The embed needs
+  an RLS SELECT policy on `location_names` for the allowed email (see the
+  README); without one the place name silently comes back `null`. The
+  columns come from the `photo-match-next` normalize-columns migration. The
+  LAN dry-run script gets `camera_name` by joining `camera_names`.
+- **`location_names.value` has two literal placeholder values** —
   `"Add a location"` (Google Photos, when nothing's tagged) and
   `"Unknown location"`. `parseLocationName()` treats both as empty
   rather than displaying them. If a similar placeholder ever shows up
@@ -565,6 +597,15 @@ third-party API scope headaches, just "prove you're the one allowed
 GitHub account").
 
 ## Open items / things a new session might need to pick up
+
+- **Deploy the normalized-columns build to the TV, then confirm locations show
+  (2026-11-06).** The change is on `main` (commit `3304065`), but its GitHub
+  Action run failed at "Confirm the TV is reachable" (TV off/asleep or the
+  Developer Mode session lapsed), so nothing was installed. The database
+  contract step already dropped `hashes.location`/`location_name`, so the old
+  build on the TV can't read locations until a run succeeds. Turn the TV on,
+  renew Developer Mode if needed, re-run the failed job (or push a change under
+  `src/`), then check that a photo with a location shows it.
 
 - **Run `server/photo_serve.py`** on the LAN machine in place of the
   plain `python -m http.server` it's replacing — see "Duplicate

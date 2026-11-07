@@ -73,6 +73,11 @@ const CONFIG = {
   // date + location.
   SHOW_FILENAME_OVERLAY: true,
 
+  // Live clock (current time + date) in the top-right corner. Uses the
+  // TV's own locale and timezone settings, so 12h/24h and date order
+  // follow whatever the TV is set to. Set false to hide it entirely.
+  SHOW_CLOCK: true,
+
   // wa.filetype values considered "an image" — adjust here if the
   // actual stored values turn out to differ (see README.md note).
   IMAGE_FILETYPES: ["Image", "image/jpeg"],
@@ -117,6 +122,10 @@ const el = {
   overlayDate: document.getElementById("overlay-date"),
   overlayLocation: document.getElementById("overlay-location"),
   overlayFilename: document.getElementById("overlay-filename"),
+
+  clock: document.getElementById("clock"),
+  clockTime: document.getElementById("clock-time"),
+  clockDate: document.getElementById("clock-date"),
 
   menuOverlay: document.getElementById("menu-overlay"),
   menuLogout: document.getElementById("menu-logout"),
@@ -257,13 +266,20 @@ async function fetchPhotoByWaId(waId) {
 async function fetchPhotoByWaRow(waRow) {
   const { data: hashRows, error: hashError } = await supabaseClient
     .from("hashes")
-    .select("filename, location, location_name, timestamp")
+    // lat/lon are plain columns; the place name lives in the small
+    // location_names lookup table (hashes.location_name_id -> location_names),
+    // embedded here via PostgREST. location_names needs its own RLS policy
+    // (see README) or this embed silently comes back null.
+    .select("filename, lat, lon, timestamp, location_names(value)")
     .eq("id", waRow.id_hash)
     .limit(1);
 
   if (hashError) throw hashError;
   const meta = hashRows && hashRows[0];
   if (!meta) throw new Error(`No hashes row found for wa id ${waRow.id} (id_hash ${waRow.id_hash}).`);
+  // Flatten the embed so the rest of the app keeps reading meta.location_name.
+  meta.location_name = meta.location_names ? meta.location_names.value : null;
+  delete meta.location_names;
 
   meta.waId = waRow.id;
   meta.hashId = waRow.id_hash;
@@ -313,7 +329,7 @@ async function fetchRandomPhoto() {
 }
 
 /**
- * hashes.location_name looks like:
+ * location_names.value (reached via hashes.location_name_id) looks like:
  *   "Holon\nEstimated location - \nLearn more"
  * The actual place name is the first line; the rest is Google Photos'
  * own UI boilerplate, not meaningful metadata.
@@ -335,12 +351,12 @@ function parseLocationName(raw) {
   return name;
 }
 
-/** hashes.location looks like "https://www.google.com/maps?q=loc:LAT,LNG". */
-function parseMapsCoords(raw) {
-  if (!raw) return null;
-  const match = raw.match(/loc:(-?\d+\.?\d*),(-?\d+\.?\d*)/);
-  if (!match) return null;
-  return { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
+/** hashes.lat / hashes.lon (float8 columns) as {lat, lng}, or null when the
+ *  photo has no location. (Used to be parsed out of a Google Maps URL stored
+ *  in hashes.location.) */
+function metaCoords(meta) {
+  if (meta.lat == null || meta.lon == null) return null;
+  return { lat: meta.lat, lng: meta.lon };
 }
 
 /**
@@ -459,7 +475,7 @@ function formatLocation(meta) {
 
   // Geocoding hasn't resolved (still in flight, or failed) and there's
   // no location_name either — last-resort raw coordinates.
-  const coords = parseMapsCoords(meta.location);
+  const coords = metaCoords(meta);
   if (coords) return `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`;
 
   return "";
@@ -772,7 +788,7 @@ async function resolveAndPreload(meta) {
  *  rather than one after another. */
 async function fetchAndPreloadOne() {
   const meta = await fetchRandomPhoto();
-  const coords = parseMapsCoords(meta.location);
+  const coords = metaCoords(meta);
   const [, geocodedPlace] = await Promise.all([
     resolveAndPreload(meta),
     coords ? reverseGeocode(coords) : Promise.resolve(null),
@@ -894,8 +910,39 @@ function goToPrevSlide() {
   restartSlideTimer();
 }
 
+/* ---------------------- Live clock ---------------------- */
+
+let clockTimer = null;
+
+function renderClock() {
+  const now = new Date();
+  el.clockTime.textContent = now.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  el.clockDate.textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+}
+
+/** Idempotent — safe to call every time the slideshow (re)starts. Ticks
+ *  every second rather than scheduling for the next minute boundary so a
+ *  TV suspend/resume or system clock change can never leave it stale;
+ *  the text only changes once a minute anyway. */
+function startClock() {
+  if (!CONFIG.SHOW_CLOCK) {
+    el.clock.classList.add("hidden");
+    return;
+  }
+  el.clock.classList.remove("hidden");
+  renderClock();
+  clearInterval(clockTimer);
+  clockTimer = setInterval(renderClock, 1000);
+}
+
+function stopClock() {
+  clearInterval(clockTimer);
+  clockTimer = null;
+}
+
 function startSlideshow() {
   showScreen("slideshow");
+  startClock();
   topUpQueue(); // fire-and-forget; fills in parallel with the first fetch below
   showNextSlide();
   restartSlideTimer();
@@ -914,6 +961,7 @@ function startSlideshow() {
  *  instead.) */
 async function logOut() {
   clearInterval(slideTimer);
+  stopClock();
   // `upcoming` is intentionally left alone here — those photos (and
   // any blob: URLs already decoded for them) are still valid and get
   // shown after re-pairing; `history` is what's actually discarded.
@@ -1106,7 +1154,7 @@ function suppressScreenSaverViaLuna() {
 window.debugShowPhoto = function debugShowPhoto(waId) {
   return (async () => {
     const meta = await fetchPhotoByWaId(waId);
-    const coords = parseMapsCoords(meta.location);
+    const coords = metaCoords(meta);
     await Promise.all([
       resolveAndPreload(meta),
       coords
