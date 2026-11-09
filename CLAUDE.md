@@ -104,6 +104,7 @@ server/                 ← LAN photo server, run manually on whichever machine 
   photo_serve_dryrun.py    read-only: reports every collision + what the resolver would pick, no server needed
   config.json               (repo owner adds this, gitignored) direct Postgres credentials - same shape as phash's own config.json, NOT the Supabase anon key
 .github/workflows/deploy-webos.yml   ← package + Tailscale + install to TV
+.github/workflows/deploy-repo.yml    ← standalone: package + publish .ipk + apps.json to Vercel behind Basic Auth (never touches the TV)
 pairing-backend/        ← RETIRED — superseded by webapp/api/auth/*, safe to delete
                            once the new flow is confirmed working end-to-end
 ```
@@ -331,6 +332,22 @@ reuse `overlayDate` for it — they mean different things.
   If the time is wrong on the TV, fix the TV's date/time/timezone
   setting — nothing in this app sets it.
 - `CONFIG.SHOW_CLOCK` (default `true`) turns it off entirely.
+
+## Homebrew repo workflow (`deploy-repo.yml`)
+
+Added 2026-11-07. A second, standalone workflow that publishes the app as a
+webOS homebrew repo; it never touches the TV and never commits `apps.json`.
+Triggers: push to `main` under `src/**` (or to the workflow file) and manual
+`workflow_dispatch` — so a `src/` push runs this *and* `deploy-webos.yml`.
+
+Steps: build the `.ipk` exactly like `deploy-webos.yml` (same placeholder
+injection into `app.js`/`appinfo.json`, same optional icon decrypt) → generate
+`apps.json` from `appinfo.json` (sha256 and size of the `.ipk`, `ipkUrl`
+relative to `apps.json`, icon embedded as a data URI) → write a Basic Auth
+`middleware.js` into `dist/` (credentials are read at runtime from the Vercel
+project's `REPO_USERNAME` / `REPO_PASSWORD`, never embedded) → `vercel deploy
+--prod` of `dist/`. The three Vercel secrets are whitespace-trimmed before use,
+since pasted secrets can carry stray spaces or newlines.
 
 ## Debugging console helpers
 
@@ -598,14 +615,13 @@ GitHub account").
 
 ## Open items / things a new session might need to pick up
 
-- **Deploy the normalized-columns build to the TV, then confirm locations show
-  (2026-11-06).** The change is on `main` (commit `3304065`), but its GitHub
-  Action run failed at "Confirm the TV is reachable" (TV off/asleep or the
-  Developer Mode session lapsed), so nothing was installed. The database
-  contract step already dropped `hashes.location`/`location_name`, so the old
-  build on the TV can't read locations until a run succeeds. Turn the TV on,
-  renew Developer Mode if needed, re-run the failed job (or push a change under
-  `src/`), then check that a photo with a location shows it.
+- **Confirm locations show on the TV (updated 2026-11-08).** The build that
+  reads the normalized columns (commit `3304065`) was deployed to the TV
+  successfully on 2026-11-08 — after the first run on 2026-11-06 failed at
+  "Confirm the TV is reachable" (TV off or Developer Mode lapsed) — but it has
+  not been tested yet. The database contract step dropped
+  `hashes.location`/`location_name`, so check that a photo with a location
+  shows it (the old build could not read locations).
 
 - **Run `server/photo_serve.py`** on the LAN machine in place of the
   plain `python -m http.server` it's replacing — see "Duplicate
@@ -632,6 +648,12 @@ GitHub account").
     `WEBOS_TV_SSH_KEY_B64`, `WEBOS_TV_HOST`, `TV_PASSPHRASE`,
     `WEBOS_APP_ID`, `WEBAPP_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
     `PHOTO_SERVER_URL`
+  - **GitHub repo secrets for `deploy-repo.yml`** (in addition to the above):
+    `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` (the Vercel project
+    that hosts the homebrew repo), optionally `ICON_DECRYPT_PASSPHRASE`
+  - **Vercel (homebrew repo project) env vars**: `REPO_USERNAME`,
+    `REPO_PASSWORD` (HTTP Basic Auth; the middleware fails closed with a 500 if
+    they are missing)
   - **Vercel (webapp) env vars**: `NEXT_PUBLIC_SUPABASE_URL`,
     `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAIL`, plus
     `KV_REST_API_URL`/`KV_REST_API_TOKEN` (auto-injected by attaching a

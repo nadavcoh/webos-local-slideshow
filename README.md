@@ -510,6 +510,22 @@ diverged from a "textbook" version in a few deliberate ways:
   files anyway (gitignored), but keeps a stray local file from ever
   ending up in a manually-built `.ipk` either.
 
+### e) Publishing a webOS homebrew repo (`deploy-repo.yml`, optional)
+
+A separate workflow, `.github/workflows/deploy-repo.yml`, builds the same
+`.ipk` and publishes it together with a generated `apps.json` to a Vercel
+project behind HTTP Basic Auth, so it can be added as a webOS homebrew
+repository. It never touches the TV. It runs on pushes to `main` that change
+`src/**` (alongside `deploy-webos.yml`) and can be started manually from the
+Actions tab.
+
+Setup: create an empty Vercel project for it, add the GitHub secrets
+`VERCEL_TOKEN`, `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID`, and set
+`REPO_USERNAME` / `REPO_PASSWORD` as environment variables on that Vercel
+project (the Basic Auth middleware reads them at runtime and refuses to serve
+anything if they are missing). The app config secrets from section (c) are
+reused.
+
 ## Notes / things to adjust for your setup
 
 - **15-second crossfade timing** lives in `CONFIG.SLIDE_INTERVAL_MS` and
