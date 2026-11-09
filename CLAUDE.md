@@ -615,13 +615,12 @@ GitHub account").
 
 ## Open items / things a new session might need to pick up
 
-- **Confirm locations show on the TV (updated 2026-11-08).** The build that
-  reads the normalized columns (commit `3304065`) was deployed to the TV
-  successfully on 2026-11-08 — after the first run on 2026-11-06 failed at
-  "Confirm the TV is reachable" (TV off or Developer Mode lapsed) — but it has
-  not been tested yet. The database contract step dropped
-  `hashes.location`/`location_name`, so check that a photo with a location
-  shows it (the old build could not read locations).
+- **Resolved 2026-11-09: locations on the TV.** The build that reads the
+  normalized columns (commit `3304065`) was deployed to the TV on 2026-11-08 —
+  after the first run on 2026-11-06 failed at "Confirm the TV is reachable"
+  (TV off or Developer Mode lapsed) — and the check that a photo with a
+  location shows it passed on 2026-11-09. (The database contract step had
+  dropped `hashes.location`/`location_name`, which the old build read.)
 
 - **Run `server/photo_serve.py`** on the LAN machine in place of the
   plain `python -m http.server` it's replacing — see "Duplicate
