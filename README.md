@@ -158,9 +158,6 @@ or the underlying data changes enough to be worth spot-checking again.
    photo-match-next migration `20261110120000_restrict_rls_to_owner.sql`
    (named `owner can read wa`, `owner can read hashes`,
    `owner can read location_names`), so don't create the ones above there.
-   Before that migration, other policies on `hashes` and the lookup tables
-   allowed any signed-in user to read them, which made the email check above
-   ineffective; they are gone now.
    (`location_names` and the `hashes.lat` / `hashes.lon` / `location_name_id`
    columns come from the photo-match-next "normalize columns" migration — the
    TV app no longer reads `hashes.location` / `hashes.location_name`, which
