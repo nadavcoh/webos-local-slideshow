@@ -62,7 +62,11 @@ current architecture:
     poll a given session id).
   - `/tv-login` — the mobile landing page the QR code points at;
     drives the Supabase GitHub OAuth (implicit flow, tokens land in
-    the URL hash) and calls `tv-handoff` once signed in.
+    the URL hash) and calls `tv-handoff` once signed in. The sign-in
+    passes `queryParams: { prompt: "select_account" }` so GitHub shows its
+    account chooser, and a failed hand-off shows a "Use a different GitHub
+    account" button (`switchAccount`: local sign-out, then sign-in again).
+    Keep both when changing this page.
 
 This is **not** a real OAuth Device Flow (RFC 8628) — no device code
 is verified against GitHub/Supabase directly, and the TV's UUID is
@@ -511,7 +515,7 @@ structured even though the specific APIs are gone:
   through `hashes.location_name_id`), flattens it into `meta.location_name`,
   and `metaCoords(meta)` returns `{lat, lng}` from `meta.lat`/`meta.lon` (or
   `null`) where `parseMapsCoords(meta.location)` used to be. The embed needs
-  an RLS SELECT policy on `location_names` for the allowed email (see the
+  an RLS SELECT policy on `location_names` for the owner account (see the
   README); without one the place name silently comes back `null`. The
   columns come from the `photo-match-next` normalize-columns migration. The
   LAN dry-run script gets `camera_name` by joining `camera_names`.

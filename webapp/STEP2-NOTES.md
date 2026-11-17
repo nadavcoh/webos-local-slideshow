@@ -23,8 +23,10 @@ change.
    string won't survive the trip to GitHub and back) and strips it from
    the visible URL.
 3. User taps **Sign in with GitHub** →
-   `supabase.auth.signInWithOAuth({ provider: "github", redirectTo:
-   ".../tv-login" })`.
+   `supabase.auth.signInWithOAuth({ provider: "github", options: {
+   redirectTo: ".../tv-login", queryParams: { prompt: "select_account" } } })`.
+   `prompt=select_account` makes GitHub show its account chooser instead of
+   silently reusing the account the browser is signed in with.
 4. GitHub → Supabase → back to `/tv-login`, this time with the session
    in the URL hash (`#access_token=...`). `detectSessionInUrl` parses
    it automatically and fires a `SIGNED_IN` event.
@@ -63,7 +65,9 @@ curl "http://localhost:3000/api/auth/tv-poll?sessionId=<uuid>"
 To test the allowlist rejection path, sign in with a GitHub account
 other than `cohen.n@gmail.com` — you should land on the "This GitHub
 account isn't authorized" error state, and `tv-handoff` should have
-returned a 401 without ever writing to KV.
+returned a 401 without ever writing to KV. That error screen has a
+"Use a different GitHub account" button: it signs out locally and signs in
+again with the account chooser, keeping the stored pairing session id.
 
 ## Next steps (not built yet)
 

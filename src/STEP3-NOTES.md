@@ -68,16 +68,20 @@ table/column names if they differ from the spec):
 alter table wa enable row level security;
 alter table hashes enable row level security;
 
-create policy "allowed account can read wa"
+-- <owner-user-id> = the owner's Supabase user id (select id from auth.users).
+create policy "owner can read wa"
   on wa for select
   to authenticated
-  using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+  using ((select auth.uid()) = '<owner-user-id>'::uuid);
 
-create policy "allowed account can read hashes"
+create policy "owner can read hashes"
   on hashes for select
   to authenticated
-  using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+  using ((select auth.uid()) = '<owner-user-id>'::uuid);
 ```
+
+(On the shared production database these already exist, under the same names,
+via the photo-match-next migrations — see the README.)
 
 ## One thing to verify before this runs correctly
 

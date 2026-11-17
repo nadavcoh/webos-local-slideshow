@@ -137,27 +137,29 @@ or the underlying data changes enough to be worth spot-checking again.
    alter table hashes enable row level security;
    alter table location_names enable row level security;
 
-   create policy "allowed account can read wa"
+   -- <owner-user-id> = the owner's Supabase user id
+   -- (select id from auth.users).
+   create policy "owner can read wa"
      on wa for select
      to authenticated
-     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+     using ((select auth.uid()) = '<owner-user-id>'::uuid);
 
-   create policy "allowed account can read hashes"
+   create policy "owner can read hashes"
      on hashes for select
      to authenticated
-     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+     using ((select auth.uid()) = '<owner-user-id>'::uuid);
 
    -- hashes.location_name_id points into this small lookup table; the TV
    -- embeds it (location_names(value)) to show the place name.
-   create policy "allowed account can read location_names"
+   create policy "owner can read location_names"
      on location_names for select
      to authenticated
-     using (auth.jwt() ->> 'email' = 'cohen.n@gmail.com');
+     using ((select auth.uid()) = '<owner-user-id>'::uuid);
    ```
-   On the shared production database these policies now come from the
-   photo-match-next migration `20261110120000_restrict_rls_to_owner.sql`
-   (named `owner can read wa`, `owner can read hashes`,
-   `owner can read location_names`), so don't create the ones above there.
+   On the shared production database these policies already exist: they come
+   from the photo-match-next migrations `20261110120000_restrict_rls_to_owner.sql`
+   and `20261117120000_owner_policies_by_user_id.sql` (which switched them from
+   the JWT email to the owner's user id), so don't create the ones above there.
    (`location_names` and the `hashes.lat` / `hashes.lon` / `location_name_id`
    columns come from the photo-match-next "normalize columns" migration — the
    TV app no longer reads `hashes.location` / `hashes.location_name`, which
@@ -295,7 +297,11 @@ To iterate quickly during development, `ares-install` again after each
 
 1. The app shows one QR code / link. Scan it (or open the link) on your
    phone — it takes you to the web app's sign-in page, where you sign
-   in with the one allowed GitHub account.
+   in with the one allowed GitHub account. The button asks GitHub for its
+   account picker (`prompt=select_account`), so you can choose the account
+   even if the phone's browser is already signed in to another one. If the
+   chosen account is not authorised, the error screen offers "Use a different
+   GitHub account".
 2. The slideshow starts automatically once sign-in completes.
    Supabase's client library keeps the session valid on its own
    (automatic token refresh), so a reboot skips pairing entirely —
