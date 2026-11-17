@@ -12,6 +12,9 @@ const SESSION_STORAGE_KEY = "tv_pairing_session_id";
 export default function TvLoginPage() {
   const [status, setStatus] = useState("loading");
   const [errorMessage, setErrorMessage] = useState("");
+  // True when the failure happened after signing in, so trying another GitHub
+  // account can help (not for a missing pairing session).
+  const [canSwitch, setCanSwitch] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -70,6 +73,7 @@ export default function TvLoginPage() {
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         setStatus("error");
+        setCanSwitch(true);
         setErrorMessage(
           body.error === "Invalid Supabase session"
             ? "This GitHub account isn't authorized for this TV."
@@ -82,6 +86,7 @@ export default function TvLoginPage() {
       setStatus("done");
     } catch {
       setStatus("error");
+      setCanSwitch(true);
       setErrorMessage("Couldn't reach the server. Check your connection and try again.");
     }
   }
@@ -90,10 +95,21 @@ export default function TvLoginPage() {
     setStatus("signing-in");
     await supabase.auth.signInWithOAuth({
       provider: "github",
-      options: { redirectTo: `${window.location.origin}/tv-login` },
+      options: {
+        redirectTo: `${window.location.origin}/tv-login`,
+        // Make GitHub show its account picker instead of silently reusing the
+        // account that is already signed in in this browser / PWA.
+        queryParams: { prompt: "select_account" },
+      },
     });
     // Browser navigates to GitHub here; nothing after this line runs
     // in this page load.
+  }
+
+  // Drop the (wrong) session on this device, then sign in again with the picker.
+  async function switchAccount() {
+    await supabase.auth.signOut();
+    await signIn();
   }
 
   return (
@@ -122,6 +138,9 @@ export default function TvLoginPage() {
         <>
           <h1>Something went wrong</h1>
           <p>{errorMessage}</p>
+          {canSwitch && (
+            <button onClick={switchAccount}>Use a different GitHub account</button>
+          )}
         </>
       )}
 
