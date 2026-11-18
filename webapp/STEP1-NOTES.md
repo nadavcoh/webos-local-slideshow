@@ -10,7 +10,7 @@ those are separate steps.
 - `app/api/auth/tv-handoff/route.js` — `POST`, called by the mobile
   page after GitHub SSO completes. Verifies the `access_token` against
   Supabase itself (never trusts the client's claimed identity), checks
-  the resulting email against `ALLOWED_EMAIL`, then stores both tokens
+  the resulting GitHub identity id against `ALLOWED_GITHUB_ID`, then stores both tokens
   in KV under `tv-handoff:<tvSessionId>` with a 300s TTL.
 - `app/api/auth/tv-poll/route.js` — `GET ?sessionId=<uuid>`, called by
   the TV every ~3s. Returns `{status: "pending"}` (202) until the
@@ -28,8 +28,8 @@ those are separate steps.
    this auto-populates `KV_REST_API_URL`/`KV_REST_API_TOKEN`, same as
    the old pairing-backend.
 3. Copy `.env.example` to `.env.local` and fill in the Supabase project
-   URL/anon key. `ALLOWED_EMAIL` defaults to `cohen.n@gmail.com` if
-   unset.
+   URL/anon key. `ALLOWED_GITHUB_ID` is optional and defaults to the
+   owner's GitHub user id (`29537286`).
 4. `npm run dev`, then exercise the flow manually:
    ```bash
    # Simulate the TV starting a session:
@@ -62,7 +62,7 @@ those are separate steps.
   and the del isn't a real replay risk here. Flagged in the route's
   comments if this ever gets reused somewhere less trusted.
 - **Allowlist check happens server-side, not just in the mobile UI** —
-  `tv-handoff` re-verifies the token and email itself rather than
+  `tv-handoff` re-verifies the token and GitHub id itself rather than
   trusting whatever the mobile page sends, same reasoning as
   photo-match-pwa's allowlist.
 - **CORS is wide open (`Access-Control-Allow-Origin: *`)** on both

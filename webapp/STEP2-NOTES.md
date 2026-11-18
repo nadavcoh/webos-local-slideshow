@@ -63,7 +63,7 @@ curl "http://localhost:3000/api/auth/tv-poll?sessionId=<uuid>"
 ```
 
 To test the allowlist rejection path, sign in with a GitHub account
-other than `cohen.n@gmail.com` — you should land on the "This GitHub
+other than the owner's (GitHub user id `29537286`) — you should land on the "This GitHub
 account isn't authorized" error state, and `tv-handoff` should have
 returned a 401 without ever writing to KV. That error screen has a
 "Use a different GitHub account" button: it signs out locally and signs in

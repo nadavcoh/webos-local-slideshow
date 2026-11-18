@@ -25,8 +25,8 @@ era" below for why that existed and why it was retired. As of the
 current architecture:
 
 - **Auth**: Supabase (GitHub SSO), restricted to a single allowed
-  email (`cohen.n@gmail.com`, same allowlist pattern as
-  `photo-match-next`).
+  GitHub user id (`29537286`, same pattern as `photo-match-next`;
+  `tv-handoff` checks the user's GitHub identity, env `ALLOWED_GITHUB_ID`).
 - **Photo data**: a `wa` table (photo metadata, one row per photo)
   joined against a `hashes` table (`wa.id_hash -> hashes.id`) for
   filename, location (`lat`/`lon`), the place name (`location_name_id` ->
@@ -53,7 +53,7 @@ current architecture:
   - `POST /api/auth/tv-handoff` — phone calls this after Supabase
     GitHub sign-in, sending `tvSessionId` + both tokens. Server
     re-verifies the access token against Supabase itself and checks
-    the email server-side before writing to KV (5 min TTL) — the
+    the GitHub identity (id) server-side before writing to KV (5 min TTL) — the
     client's claimed identity is never trusted directly.
   - `GET /api/auth/tv-poll?sessionId=...` — TV polls this every ~3s;
     returns the tokens once available and deletes the KV record in
@@ -79,11 +79,11 @@ Flow in user-facing copy.
 There's no shared secret gating the pairing URL anymore (the old
 `PAIRING_SHARED_SECRET` had no equivalent introduced). A stranger who
 finds this TV's QR/URL only reaches a GitHub sign-in page —
-`tv-handoff` itself rejects anyone whose GitHub-verified email isn't
-the one allowed address, so gating the URL earlier would add nothing.
+`tv-handoff` itself rejects anyone whose GitHub user id isn't
+the allowed one, so gating the URL earlier would add nothing.
 The Supabase anon key embedded in the TV app is meant to be
 public/client-side; RLS policies on `wa`/`hashes` (scoped to the
-allowed email) are the actual access control — **if those policies
+owner's user id) are the actual access control — **if those policies
 are missing, the TV app will silently get zero rows back, not an
 error.** See README.md for the policy SQL.
 
@@ -99,7 +99,7 @@ src/                    ← the actual webOS app (ares-package src)
   largeIcon.png.gpg              (repo owner adds this) real icon, GPG-encrypted
   secrets.local.js.example  copy → secrets.local.js (gitignored) for local testing
 webapp/                 ← separate Next.js/Vercel deployment, NOT packaged into the TV app
-  app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + email
+  app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + GitHub id
   app/api/auth/tv-poll/route.js      TV polls this for the tokens
   app/tv-login/page.js                mobile landing page, drives Supabase GitHub sign-in
   lib/                                 cors.js, uuid.js, supabaseClient.js
@@ -658,7 +658,8 @@ GitHub account").
     `REPO_PASSWORD` (HTTP Basic Auth; the middleware fails closed with a 500 if
     they are missing)
   - **Vercel (webapp) env vars**: `NEXT_PUBLIC_SUPABASE_URL`,
-    `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAIL`, plus
+    `NEXT_PUBLIC_SUPABASE_ANON_KEY`, optional `ALLOWED_GITHUB_ID` (replaces the old
+    `ALLOWED_EMAIL`), plus
     `KV_REST_API_URL`/`KV_REST_API_TOKEN` (auto-injected by attaching a
     Vercel KV database)
   - **Supabase dashboard**: Auth → URL Configuration → Redirect URLs

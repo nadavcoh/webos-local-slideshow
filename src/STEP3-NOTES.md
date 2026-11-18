@@ -20,8 +20,8 @@ web app.
   - **No more shared secret.** The old `PAIRING_SHARED_SECRET` gating
     `/api/start` doesn't have an equivalent — it isn't needed. A
     stranger who finds this TV's pairing URL only reaches a GitHub
-    sign-in page; `tv-handoff` itself rejects anyone whose verified
-    email isn't the allowed one, so there's nothing to gate earlier.
+    sign-in page; `tv-handoff` itself rejects anyone whose GitHub
+    user id isn't the allowed one, so there's nothing to gate earlier.
   - **Session refresh is automatic.** The old code manually tracked
     `accessToken`/`accessTokenExpiresAt` and called a `/api/refresh`
     endpoint. `supabase-js`'s client (`autoRefreshToken: true`) now

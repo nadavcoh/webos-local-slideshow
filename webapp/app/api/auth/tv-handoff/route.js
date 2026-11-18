@@ -3,9 +3,9 @@ import { createClient } from "@supabase/supabase-js";
 import { withCors, corsPreflight } from "../../../../lib/cors";
 import { isUuid } from "../../../../lib/uuid";
 
-// Same account restriction pattern as photo-match-pwa: single-user app,
-// so the allowlist is one address, not a table.
-const ALLOWED_EMAIL = (process.env.ALLOWED_EMAIL || "cohen.n@gmail.com").toLowerCase();
+// Same account restriction pattern as photo-match-next: single-user app, so the
+// allowlist is one GitHub user id (numeric, never changes), not a table.
+const ALLOWED_GITHUB_ID = process.env.ALLOWED_GITHUB_ID || "29537286";
 
 // Matches CONFIG.PAIRING_POLL_TIMEOUT_MS's role in the old pairing
 // backend, just shorter — this handoff is meant to be picked up by an
@@ -34,7 +34,7 @@ export async function POST(request) {
   }
 
   // Verify the access_token is real and current by asking Supabase, and
-  // check the email server-side — never trust anything the mobile page
+  // check the GitHub identity server-side — never trust anything the mobile page
   // claims about who's signed in. A forged/expired token, or a token
   // for the wrong GitHub account, is rejected before it ever reaches KV.
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -47,8 +47,15 @@ export async function POST(request) {
     return withCors(json({ error: "Invalid Supabase session" }, 401));
   }
 
-  const email = data.user.email?.toLowerCase();
-  if (email !== ALLOWED_EMAIL) {
+  // identities are set by the auth server (user_metadata is user-editable and is
+  // not used). For a GitHub identity, `id` is the GitHub user id.
+  const isOwner = (data.user.identities ?? []).some(
+    (identity) =>
+      identity.provider === "github" &&
+      (String(identity.id) === ALLOWED_GITHUB_ID ||
+        String(identity.identity_data?.sub) === ALLOWED_GITHUB_ID)
+  );
+  if (!isOwner) {
     // Deliberately the same generic message as an invalid token above —
     // don't tell a stranger "you're signed in fine, just not the owner."
     return withCors(json({ error: "Invalid Supabase session" }, 401));

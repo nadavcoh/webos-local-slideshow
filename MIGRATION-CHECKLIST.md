@@ -24,7 +24,7 @@ hand.
 
 - [ ] Vercel KV database attached to the project
 - [ ] Env vars set: `NEXT_PUBLIC_SUPABASE_URL`,
-      `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ALLOWED_EMAIL`
+      `NEXT_PUBLIC_SUPABASE_ANON_KEY` (`ALLOWED_GITHUB_ID` is optional)
 - [ ] Deployed, URL noted for the next section
 - [ ] (Optional but recommended) manual `curl` walkthrough from
       `webapp/STEP1-NOTES.md` to confirm `tv-handoff`/`tv-poll` work

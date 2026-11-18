@@ -17,7 +17,7 @@ photo-sharing service. Four pieces:
   packaged into the TV app or deployed anywhere — you run this
   yourself, long-lived, on whatever machine already holds the photo
   files.
-- **Supabase** — auth (GitHub SSO, restricted to one allowed email)
+- **Supabase** — auth (GitHub SSO, restricted to one allowed GitHub user id)
   and the photo database itself (`wa` + `hashes` tables, fed by a
   separate ingest project — not part of this repo).
 
@@ -58,7 +58,7 @@ webos-photos-slideshow/
 │   ├── photo_serve_dryrun.py      read-only: reports every duplicate-filename group + what the resolver would pick, without running the server
 │   └── config.json                (you add this, gitignored) Postgres credentials — DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT, same shape as the phash ingest project's config.json
 ├── webapp/                      ← Next.js app — a SEPARATE Vercel deployment, never packaged into the TV app
-│   ├── app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + email
+│   ├── app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + GitHub id
 │   ├── app/api/auth/tv-poll/route.js       TV polls this for the tokens
 │   ├── app/tv-login/page.js                 mobile landing page, drives Supabase GitHub sign-in
 │   └── lib/                                  cors.js, uuid.js, supabaseClient.js
@@ -188,7 +188,8 @@ these Vercel environment variables:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- `ALLOWED_EMAIL` (defaults to `cohen.n@gmail.com` if unset)
+- `ALLOWED_GITHUB_ID` (optional; defaults to the owner's GitHub user id, `29537286`)
+  — replaces the old `ALLOWED_EMAIL`, which can be removed from Vercel
 
 Deploy (`vercel deploy` or connect the repo/subdirectory in the Vercel
 dashboard) and note the resulting `https://....vercel.app` URL.
