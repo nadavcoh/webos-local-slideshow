@@ -37,8 +37,8 @@
  * SECURITY MODEL CHANGE from the old pairing-backend: there's no
  * shared secret gating the pairing URL anymore. A stranger who finds
  * this TV's QR/URL can only reach the GitHub sign-in page — the
- * web app's tv-handoff endpoint rejects anyone whose GitHub-verified
- * email isn't the one allowed address, so getting to that page buys
+ * web app's tv-handoff endpoint rejects anyone whose GitHub user id
+ * isn't the allowed one, so getting to that page buys
  * them nothing.
  * ============================================================ */
 
