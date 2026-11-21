@@ -357,6 +357,32 @@ project's `REPO_USERNAME` / `REPO_PASSWORD`, never embedded) → `vercel deploy
 --prod` of `dist/`. The three Vercel secrets are whitespace-trimmed before use,
 since pasted secrets can carry stray spaces or newlines.
 
+Hosting facts (as of 2026-11-21):
+
+- Dedicated Vercel project `webos-homebrew-repo`, no Git link, served at
+  `https://webos-homebrew-repo.vercel.app`. Repository URL for the Homebrew
+  Channel: `https://webos-homebrew-repo.vercel.app/apps.json`. Don't reuse the
+  Git-linked `webos-local-slideshow` Vercel project.
+- Vercel Authentication (Deployment Protection) must be **off**, otherwise
+  Vercel's login wall blocks the TV before the Basic Auth middleware runs.
+- Env vars apply only to new deployments: after changing `REPO_USERNAME` /
+  `REPO_PASSWORD`, re-run the workflow.
+- `apps.json` follows the webosbrew repository format: `{paging, packages[]}`
+  with each package carrying an inline `manifest` (`id`, `version`, `type`,
+  `title`, `appDescription`, `iconUri`, `sourceUrl`, `rootRequired`, `ipkUrl`,
+  `ipkSize`, `ipkHash.sha256`). An earlier draft used wrong field names
+  (`ipkUri`, `description`) and an empty `iconUri` — don't regress to that.
+- Edge middleware: no `crypto.timingSafeEqual` on the Edge runtime, so the
+  credential comparison is a hand-written constant-time loop; "continue" is
+  `new Response(null, {headers: {"x-middleware-next": "1"}})`.
+- **Unverified**: whether the Homebrew Channel can send Basic Auth when fetching
+  `apps.json` and the `.ipk`. If it can't, try
+  `https://user:pass@<host>/apps.json`, or reconsider the auth approach.
+- Failure seen once: `Project not found` from `vercel deploy` was caused by a
+  trailing space in the `VERCEL_PROJECT_ID` secret (visible as `*** ` in the log)
+  — now handled by the trim step. A first run also fails at the deploy step until
+  the project and the three secrets exist.
+
 ## Debugging console helpers
 
 `window.debugShowPhoto(waId)` — callable directly from the
