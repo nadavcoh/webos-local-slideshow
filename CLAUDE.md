@@ -106,6 +106,7 @@ webapp/                 ← separate Next.js/Vercel deployment, NOT packaged int
 server/                 ← LAN photo server, run manually on whichever machine holds the photos - NOT packaged/deployed by anything else in this repo
   photo_serve.py           serves photo bytes; resolves wa.filename collisions via ?hash_id= (see "Duplicate filenames" below)
   photo_serve_dryrun.py    read-only: reports every collision + what the resolver would pick, no server needed
+  requirements.txt          Python deps for both scripts (Pillow>=9.4, pillow-heif, psycopg2-binary); `pip install -r server/requirements.txt`. Keep it in sync if either script gains a third-party import
   config.json               (repo owner adds this, gitignored) direct Postgres credentials - same shape as phash's own config.json, NOT the Supabase anon key
 .github/workflows/deploy-webos.yml   ← package + Tailscale + install to TV
 .github/workflows/deploy-repo.yml    ← standalone: package + publish .ipk + apps.json to Vercel behind Basic Auth (never touches the TV)
@@ -295,7 +296,10 @@ change, no re-ingesting/re-scraping WhatsApp or Google Photos):
   string, so rows that share a filename also share that timestamp; use
   `hashes.timestamp` (reached via `id_hash`) instead, which comes from
   Google Photos independently.
-- **`server/photo_serve.py` needs `pillow-heif`, not just Pillow.** WhatsApp
+- **`server/photo_serve.py` needs `pillow-heif`, not just Pillow** (both are
+  pinned in `server/requirements.txt`, along with `psycopg2-binary` — the
+  binary wheel, so Windows installs need no compiler — and `Pillow>=9.4`
+  because the code uses `ExifTags.IFD`). WhatsApp
   media includes HEIC files, and plain Pillow can't open them at all —
   `Image.open()` raises "cannot identify image file", the same
   underlying gap the TV app itself works around with `libheif` (see
@@ -629,7 +633,7 @@ GitHub account").
 - **Run `server/photo_serve.py`** on the LAN machine in place of the
   plain `python -m http.server` it's replacing — see "Duplicate
   filenames on the LAN photo server" above and the README's "Photo
-  server (`server/`)" section for setup (deps, `config.json`, which
+  server (`server/`)" section for setup (`pip install -r server/requirements.txt`, `config.json`, which
   constants to adjust). Until that swap happens, `?hash_id=...` is sent
   but ignored (a bare static server just serves whatever's literally at
   that path), so colliding `wa` rows will keep unpredictably showing
