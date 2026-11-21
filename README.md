@@ -52,7 +52,7 @@ webos-photos-slideshow/
 │   ├── heic-worker.js               ← off-main-thread HEIC→JPEG decode (see CLAUDE.md "HEIC photos")
 │   ├── vendor/libheif/               ← vendored WASM build of libheif used by heic-worker.js
 │   └── secrets.local.js.example     ← copy to secrets.local.js (gitignored) for local testing
-├── .github/workflows/          ← GitHub Action: package + deploy to the TV over Tailscale
+├── .github/workflows/          ← deploy-webos.yml (package + deploy to the TV over Tailscale) and deploy-repo.yml (publish a homebrew repo to Vercel)
 ├── server/                      ← LAN photo server — runs on a machine in your home LAN, NOT packaged/deployed by anything above
 │   ├── photo_serve.py             serves photo bytes; disambiguates duplicate filenames via ?hash_id= (see CLAUDE.md)
 │   ├── photo_serve_dryrun.py      read-only: reports every duplicate-filename group + what the resolver would pick, without running the server
@@ -540,6 +540,28 @@ Setup: create an empty Vercel project for it, add the GitHub secrets
 project (the Basic Auth middleware reads them at runtime and refuses to serve
 anything if they are missing). The app config secrets from section (c) are
 reused.
+
+Details worth knowing:
+
+- Use a **dedicated** Vercel project (currently `webos-homebrew-repo`, served at
+  `https://webos-homebrew-repo.vercel.app`), not Git-linked, and not the project
+  that hosts `webapp/`.
+- Turn **Vercel Authentication** (Settings → Deployment Protection) off for it,
+  otherwise Vercel's own login page sits in front of the Basic Auth prompt.
+- Environment variables only apply to *new* deployments — re-run the workflow
+  after adding or changing `REPO_USERNAME` / `REPO_PASSWORD`.
+- The workflow strips whitespace from the three Vercel secrets before use; a
+  trailing space pasted into `VERCEL_PROJECT_ID` once caused a
+  "Project not found" failure.
+- `apps.json` follows the webosbrew repository format: a `paging` object plus a
+  `packages` array, each package carrying an inline `manifest` (`id`, `version`,
+  `type`, `title`, `appDescription`, `iconUri`, `sourceUrl`, `rootRequired`,
+  `ipkUrl`, `ipkSize`, `ipkHash.sha256`). `ipkUrl` is relative to `apps.json`.
+- Add `https://webos-homebrew-repo.vercel.app/apps.json` as a repository in the
+  Homebrew Channel. Whether the Homebrew Channel can send Basic Auth credentials
+  is **not verified**; if it can't, try `https://user:pass@<host>/apps.json`.
+- Quick check: `curl -i <url>/apps.json` should return `401`, and
+  `curl -u "$REPO_USERNAME:$REPO_PASSWORD" <url>/apps.json` the JSON.
 
 ## Notes / things to adjust for your setup
 
