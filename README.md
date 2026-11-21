@@ -56,6 +56,7 @@ webos-photos-slideshow/
 ├── server/                      ← LAN photo server — runs on a machine in your home LAN, NOT packaged/deployed by anything above
 │   ├── photo_serve.py             serves photo bytes; disambiguates duplicate filenames via ?hash_id= (see CLAUDE.md)
 │   ├── photo_serve_dryrun.py      read-only: reports every duplicate-filename group + what the resolver would pick, without running the server
+│   ├── requirements.txt           Python dependencies for both scripts above (Pillow, pillow-heif, psycopg2-binary) — `pip install -r server/requirements.txt`
 │   └── config.json                (you add this, gitignored) Postgres credentials — DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT, same shape as the phash ingest project's config.json
 ├── webapp/                      ← Next.js app — a SEPARATE Vercel deployment, never packaged into the TV app
 │   ├── app/api/auth/tv-handoff/route.js   phone → KV, after verifying the Supabase token + GitHub id
@@ -87,11 +88,14 @@ the filenames that actually collide.
 
 Setup, on whichever LAN machine holds the photo folder:
 
-1. **Dependencies**: `pip install psycopg2 Pillow pillow-heif`.
-   `pillow-heif` specifically — WhatsApp media includes HEIC files,
-   which plain Pillow can't open at all, so EXIF reads used for
-   disambiguation would silently fail on every HEIC candidate without
-   it.
+1. **Dependencies**: `pip install -r server/requirements.txt`
+   (Pillow >= 9.4, `pillow-heif`, `psycopg2-binary`; everything else the
+   scripts import is standard library). `pillow-heif` specifically —
+   WhatsApp media includes HEIC files, which plain Pillow can't open at
+   all, so EXIF reads used for disambiguation would silently fail on
+   every HEIC candidate without it. `psycopg2-binary` is used instead of
+   `psycopg2` so a Windows install doesn't need a compiler; swap it for
+   `psycopg2` in `requirements.txt` if you'd rather build from source.
 2. **`server/config.json`** (gitignored, you create this) — Postgres
    credentials for a *direct* connection, not the Supabase anon key the
    TV app uses:
