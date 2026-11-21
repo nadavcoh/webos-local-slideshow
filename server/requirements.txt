@@ -1,0 +1,11 @@
+# Dependencies for photo_serve.py and photo_serve_dryrun.py
+# (everything else they import is standard library)
+
+# EXIF reads; ExifTags.IFD needs Pillow >= 9.4
+Pillow>=9.4
+
+# HEIC support for EXIF reads (plain Pillow can't open WhatsApp HEIC files)
+pillow-heif
+
+# Postgres access for the hashes table
+psycopg2-binary
