@@ -656,6 +656,15 @@ GitHub account").
   location shows it passed on 2026-11-09. (The database contract step had
   dropped `hashes.location`/`location_name`, which the old build read.)
 
+- **Re-check the TV after the owner-only RLS migrations and the `tv-handoff`
+  change (not confirmed in these notes as of 2026-11-18).** Since the location
+  check of 2026-11-09, `photo-match-next` replaced the open `authenticated`
+  read policies with owner-only policies keyed on the GitHub user id
+  (migrations `20261110120000` and `20261117120000`), and `webapp/app/api/auth/tv-handoff/route.js` now checks the
+  GitHub identity id instead of an e-mail. On the TV: pair, confirm photos and
+  locations still load, and that the "Use a different GitHub account" button
+  works.
+
 - **Run `server/photo_serve.py`** on the LAN machine in place of the
   plain `python -m http.server` it's replacing — see "Duplicate
   filenames on the LAN photo server" above and the README's "Photo
