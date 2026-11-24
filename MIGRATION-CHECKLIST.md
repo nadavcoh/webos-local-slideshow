@@ -1,5 +1,10 @@
 # Migration checklist — Google Photos Picker → Supabase/KV
 
+> **Status (2026-11-24):** kept as a reference for the cutover. The TV app now runs
+> on the Supabase/KV flow (the location check on the TV passed on 2026-11-09), so
+> the boxes below are intentionally not ticked. What is still open is listed in
+> `CLAUDE.md` under "Open items".
+
 Everything from Steps 1–5 in one place, as an actual cutover checklist
 rather than a per-step build log. Directory names in this archive now
 match the real repo (`src/`, `webapp/`, `.github/`, root `README.md`/
