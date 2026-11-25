@@ -167,7 +167,8 @@ or the underlying data changes enough to be worth spot-checking again.
    (`location_names` and the `hashes.lat` / `hashes.lon` / `location_name_id`
    columns come from the photo-match-next "normalize columns" migration — the
    TV app no longer reads `hashes.location` / `hashes.location_name`, which
-   that migration's final step drops.)
+   that migration's final step dropped on 2026-11-06, so a TV build older than
+   the one that reads the new columns shows no location.)
 3. Note your project's **URL** and **anon/public key** (Settings →
    API) — needed by both `webapp/` and the TV app below. The anon key
    is meant to be public/client-side; RLS above is the real access
