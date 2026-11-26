@@ -595,6 +595,10 @@ Details worth knowing:
   worth of prefetching can keep up with; each unit costs one extra
   Supabase query, one extra image load, and (if the photo has
   coordinates) one extra Nominatim lookup done in advance.
+- **Startup speed**: the very first photo is shown as soon as its image
+  loads — it doesn't wait for reverse geocoding (the place name appears
+  a moment later), and the prefetch queue only starts filling after
+  that first photo is on screen.
 - **Reverse geocoding** (coords → place name) uses Nominatim's free
   public API — no API key needed, but it's meant for light,
   non-bulk use. Requests are already throttled app-wide to roughly one
