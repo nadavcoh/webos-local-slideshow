@@ -1,5 +1,13 @@
 # Step 4 — Deploy workflow (GitHub Action)
 
+> **Historical (2026-11-26):** `deploy-webos.yml`, the workflow this note is
+> about, was removed. The TV now installs from the homebrew repo published by
+> `deploy-repo.yml`, which reuses the `WEBAPP_URL` / `SUPABASE_URL` /
+> `SUPABASE_ANON_KEY` / `PHOTO_SERVER_URL` / `WEBOS_APP_ID` secrets below. The
+> Tailscale and TV secrets mentioned here (`TS_OAUTH_*`, `WEBOS_TV_*`,
+> `TV_PASSPHRASE`) are no longer used. See `CLAUDE.md`, "Removed workflow:
+> `deploy-webos.yml` (historical)".
+
 Updates the config-injection step in `deploy-webos.yml` to match the
 new `CONFIG` shape from Step 3's `app.js` rewrite. Nothing else in the
 workflow changed — Tailscale connect, ipk packaging, novacom
