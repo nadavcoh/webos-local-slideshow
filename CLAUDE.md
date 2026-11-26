@@ -17,7 +17,7 @@ an optional wa-id + filename overlay, on by default — see
 see `window.debugShowPhoto()`, below). Installed on the TV from a
 webOS homebrew repo that `deploy-repo.yml` publishes; the earlier Action that
 pushed the app to the TV over Tailscale (`deploy-webos.yml`) was removed on
-2026-11-26 — see "Removed workflow: `deploy-webos.yml` (historical)" below.
+2026-11-25 — see "Removed workflow: `deploy-webos.yml` (historical)" below.
 
 ## Architecture, and why it isn't the Google Photos thing anymore
 
@@ -111,7 +111,7 @@ server/                 ← LAN photo server, run manually on whichever machine 
   requirements.txt          Python deps for both scripts (Pillow>=9.4, pillow-heif, psycopg2-binary); `pip install -r server/requirements.txt`. Keep it in sync if either script gains a third-party import
   config.json               (repo owner adds this, gitignored) direct Postgres credentials - same shape as phash's own config.json, NOT the Supabase anon key
 .github/workflows/deploy-repo.yml    ← package + publish .ipk + apps.json to Vercel behind Basic Auth; the TV installs from this homebrew repo (the workflow never touches the TV)
-                           (deploy-webos.yml, the old Tailscale push to the TV, was removed 2026-11-26 — historical)
+                           (deploy-webos.yml, the old Tailscale push to the TV, was removed 2026-11-25 — historical)
 pairing-backend/        ← RETIRED — superseded by webapp/api/auth/*, safe to delete
                            once the new flow is confirmed working end-to-end
 ```
@@ -345,7 +345,7 @@ reuse `overlayDate` for it — they mean different things.
 
 ## Homebrew repo workflow (`deploy-repo.yml`)
 
-Added 2026-11-07. Since 2026-11-26 this is the only deploy workflow: it
+Added 2026-11-07. Since 2026-11-25 this is the only deploy workflow: it
 publishes the app as a webOS homebrew repo that the TV installs from (it never
 touches the TV and never commits `apps.json`). Triggers: push to `main` under
 `src/**` (or to the workflow file) and manual `workflow_dispatch`.
@@ -389,7 +389,7 @@ Hosting facts (as of 2026-11-21):
 ## Removed workflow: `deploy-webos.yml` (historical)
 
 `.github/workflows/deploy-webos.yml` ("Deploy Ambient Photos to webOS TV") was
-deleted on 2026-11-26 (commit `df8633e`). It packaged the app, joined the
+deleted on 2026-11-25 (commit `df8633e`). It packaged the app, joined the
 tailnet (`tailscale/github-action`, tag `tag:github-actions`), reached the TV
 through a LAN subnet router, registered it with `ares-setup-device` and ran
 `ares-install` on every push to `main` touching `src/` files (and on manual
