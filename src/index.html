@@ -62,10 +62,28 @@
          Back/Escape dismisses, and it auto-hides after a few seconds
          of inactivity either way. OK activates natively. -->
     <div id="menu-overlay" class="menu-overlay hidden">
-      <div class="menu-card">
-        <button id="menu-logout" class="menu-btn" type="button">Log Out</button>
+      <!-- Main menu. Exit is first and takes focus when the menu opens,
+           so pressing OK twice from the slideshow (once to open the
+           menu, once to activate) closes the app. -->
+      <div id="menu-main" class="menu-panel">
+        <div class="menu-card">
+          <button id="menu-exit" class="menu-btn" type="button">Exit</button>
+          <button id="menu-logout" class="menu-btn" type="button">Log Out</button>
+        </div>
+        <p class="menu-hint">OK to select &nbsp;&middot;&nbsp; Left/Right to move &nbsp;&middot;&nbsp; Back to dismiss</p>
       </div>
-      <p class="menu-hint">OK to select &nbsp;&middot;&nbsp; Back to dismiss</p>
+
+      <!-- "Are you sure?" step for Log Out. No comes first and takes
+           focus, so logging out takes a deliberate move to Yes. -->
+      <div id="menu-confirm" class="menu-panel hidden">
+        <p class="menu-prompt">Log out?</p>
+        <p class="menu-subprompt">You will need to scan the QR code again to sign back in.</p>
+        <div class="menu-card">
+          <button id="menu-confirm-no" class="menu-btn" type="button">No</button>
+          <button id="menu-confirm-yes" class="menu-btn" type="button">Yes, Log Out</button>
+        </div>
+        <p class="menu-hint">OK to select &nbsp;&middot;&nbsp; Left/Right to move &nbsp;&middot;&nbsp; Back to cancel</p>
+      </div>
     </div>
   </div>
 

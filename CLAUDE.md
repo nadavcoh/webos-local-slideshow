@@ -136,10 +136,26 @@ While the slideshow is playing:
     an inline fetch if this is empty. This is what makes skipping feel
     instant instead of waiting on a fresh round trip each time.
 - **Any other button** opens a small on-screen menu (OK activates via
-  native browser behavior, auto-hides after 8s):
-  - **Log Out** — clears the Supabase session (`auth.signOut()`) and
-    calls `boot()` again → falls through to the full `runPairing()`
-    QR.
+  native browser behavior, auto-hides after 8s). Two panels, one visible
+  at a time (`menuView`: `"main"` / `"confirm"`; `setMenuView()`):
+  - **Exit** (first button, focused when the menu opens, so OK twice from
+    the slideshow closes the app — keep it first) — `exitApp()` cancels the
+    screensaver bridge subscription (`cancelScreenSaverBridge()`, see
+    "Screensaver suppression") and calls `window.close()`, which is how a
+    webOS web app closes. Nothing is torn down before the call, so in a
+    desktop browser (where `window.close()` is a no-op) the slideshow just
+    keeps running. Not verified on the TV as of 1.0.2 — check it there.
+  - **Log Out** — opens an "Are you sure?" panel (`openLogoutConfirm()`)
+    with **No** first and focused, **Yes, Log Out** second. Only Yes runs
+    `logOut()`: clears the Supabase session (`auth.signOut()`) and calls
+    `boot()` again → falls through to the full `runPairing()` QR. No
+    dismisses the whole menu; Back in the confirmation returns to the main
+    menu (`closeLogoutConfirm()`). Keep No as the default — making an
+    accidental log-out hard was the point.
+  - Left/Right (also Up/Down) move focus between the visible panel's
+    buttons by hand (`moveMenuFocus()`): the webOS d-pad doesn't move
+    focus natively. Key auto-repeat is ignored while the menu is open, so
+    holding OK to open the menu can't also activate Exit/Yes.
   - There's **no "Repick Photos" anymore** — that was specific to
     Picker sessions, which no longer exist. If a "shuffle now" /
     "skip this one" button is wanted again, Right-arrow already does
@@ -490,6 +506,12 @@ Unchanged by the auth/data migration — still the same two layers:
 
 Both no-op harmlessly when testing via `npx serve .` in a desktop
 browser (no `WebOSServiceBridge`).
+
+The menu's **Exit** button closes the app (`window.close()`), which is
+exactly the "client app closes mid-handshake" case above. So `exitApp()`
+first calls `cancelScreenSaverBridge()` (`bridge.cancel()` on the
+`WebOSServiceBridge` kept in `screenSaverBridge`). Keep that call before
+`window.close()` if the exit path is changed.
 
 **Separately**, there's a forked `webosbrew/custom-screensaver` repo
 (not this one) that renders this app as a true system-level

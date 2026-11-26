@@ -288,9 +288,9 @@ CLI, as below, still works for development.
 
 ```bash
 ares-package src --no-minify
-# produces com.yourdomain.ambientphotos_1.0.1_all.ipk
+# produces com.yourdomain.ambientphotos_1.0.2_all.ipk
 
-ares-install -d livingroom-tv com.yourdomain.ambientphotos_1.0.1_all.ipk
+ares-install -d livingroom-tv com.yourdomain.ambientphotos_1.0.2_all.ipk
 
 ares-launch -d livingroom-tv com.yourdomain.ambientphotos
 ```
@@ -316,7 +316,12 @@ To iterate quickly during development, `ares-install` again after each
    Supabase's client library keeps the session valid on its own
    (automatic token refresh), so a reboot skips pairing entirely —
    until you explicitly Log Out from the on-screen remote menu, at
-   which point the same QR flow reappears.
+   which point the same QR flow reappears. Press any remote button during
+   the slideshow to open that menu: **Exit** (first, and focused, so OK
+   twice closes the app) and **Log Out**. Log Out asks "Log out?" first,
+   with **No** focused, so it takes a deliberate move to Yes. Left/Right
+   moves between buttons; Back dismisses the menu (or backs out of the
+   confirmation).
 3. Each photo is fetched fresh from the `wa`/`hashes` tables — there's
    no fixed "picked album" to run out of or need to refresh
    periodically, unlike the old Google Photos Picker flow.

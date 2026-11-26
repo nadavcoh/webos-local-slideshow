@@ -128,7 +128,12 @@ const el = {
   clockDate: document.getElementById("clock-date"),
 
   menuOverlay: document.getElementById("menu-overlay"),
+  menuMain: document.getElementById("menu-main"),
+  menuConfirm: document.getElementById("menu-confirm"),
+  menuExit: document.getElementById("menu-exit"),
   menuLogout: document.getElementById("menu-logout"),
+  menuConfirmNo: document.getElementById("menu-confirm-no"),
+  menuConfirmYes: document.getElementById("menu-confirm-yes"),
 
   keepalive: document.getElementById("keepalive"),
 };
@@ -965,10 +970,22 @@ function startSlideshow() {
 }
 
 /* ============================================================
- * STEP D — Remote-control menu (log out)
+ * STEP D — Remote-control menu (exit, log out)
  * ============================================================ */
 
-/** "Log Out": clears the Supabase session and drops back to the
+/** "Exit": closes the app. webOS closes a web app via window.close().
+ *  The screensaver subscription is cancelled first (see "Screensaver
+ *  suppression" in CLAUDE.md for why). In a desktop browser opened by
+ *  the user, window.close() is a no-op and the slideshow just carries
+ *  on — nothing is torn down before the call for that reason. */
+function exitApp() {
+  hideMenu();
+  cancelScreenSaverBridge();
+  window.close();
+}
+
+/** "Log Out" (reached through the menu's "Are you sure?" step, which
+ *  defaults to No): clears the Supabase session and drops back to the
  *  sign-in QR, same as a fresh first run. There's no "Repick Photos"
  *  equivalent anymore — photos come from the wa/hashes tables rather
  *  than a per-session picker selection, so there's nothing to repick.
@@ -993,16 +1010,48 @@ async function logOut() {
 
 let menuHideTimer = null;
 const MENU_AUTO_HIDE_MS = 8000;
+let menuView = "main"; // "main" (Exit / Log Out) or "confirm" (the log-out "Are you sure?")
 
 function menuIsOpen() {
   return !el.menuOverlay.classList.contains("hidden");
 }
 
+function setMenuView(view) {
+  menuView = view;
+  el.menuMain.classList.toggle("hidden", view !== "main");
+  el.menuConfirm.classList.toggle("hidden", view !== "confirm");
+}
+
+/** Opens on the main menu with Exit (the first button) focused, so
+ *  OK again exits. Always resets to the main view, so an auto-hide
+ *  while the log-out confirmation was up never reopens on it. */
 function showMenu() {
   clearTimeout(menuHideTimer);
+  setMenuView("main");
   el.menuOverlay.classList.remove("hidden");
-  el.menuLogout.focus();
+  el.menuExit.focus();
   menuHideTimer = setTimeout(hideMenu, MENU_AUTO_HIDE_MS);
+}
+
+/** Log Out asks first, with No focused — a stray OK press cancels. */
+function openLogoutConfirm() {
+  setMenuView("confirm");
+  el.menuConfirmNo.focus();
+}
+
+function closeLogoutConfirm() {
+  setMenuView("main");
+  el.menuLogout.focus();
+}
+
+/** The d-pad doesn't move focus between buttons on its own on webOS,
+ *  so step through the visible panel's buttons by hand (no wrap). */
+function moveMenuFocus(step) {
+  const panel = menuView === "confirm" ? el.menuConfirm : el.menuMain;
+  const buttons = Array.from(panel.querySelectorAll(".menu-btn"));
+  const i = buttons.indexOf(document.activeElement);
+  const next = i === -1 ? 0 : Math.max(0, Math.min(buttons.length - 1, i + step));
+  buttons[next].focus();
 }
 
 function hideMenu() {
@@ -1030,11 +1079,29 @@ document.addEventListener("keydown", (e) => {
     clearTimeout(menuHideTimer);
     menuHideTimer = setTimeout(hideMenu, MENU_AUTO_HIDE_MS);
 
+    // Ignore key auto-repeat: holding OK to open the menu must not also
+    // activate the button that just took focus (Exit, or Yes).
+    if (e.repeat) {
+      e.preventDefault();
+      return;
+    }
+
     if (isBackKey(e)) {
-      hideMenu();
+      // Back steps out of the log-out confirmation first, then dismisses.
+      if (menuView === "confirm") closeLogoutConfirm();
+      else hideMenu();
+      e.preventDefault();
+      return;
+    }
+
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      moveMenuFocus(1);
+      e.preventDefault();
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      moveMenuFocus(-1);
       e.preventDefault();
     }
-    // Enter/OK activates the (only) button natively.
+    // Enter/OK activates the focused button natively.
     return;
   }
 
@@ -1054,7 +1121,15 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-el.menuLogout.addEventListener("click", () => {
+el.menuExit.addEventListener("click", exitApp);
+
+el.menuLogout.addEventListener("click", openLogoutConfirm);
+
+// "No" dismisses the whole menu rather than returning to it, so
+// backing out of a log-out lands straight on the slideshow.
+el.menuConfirmNo.addEventListener("click", hideMenu);
+
+el.menuConfirmYes.addEventListener("click", () => {
   hideMenu();
   logOut();
 });
@@ -1100,11 +1175,26 @@ function startKeepaliveVideo() {
  * this no-ops harmlessly when testing in a desktop browser via
  * `npx serve .`, so it's safe to always call.
  */
+let screenSaverBridge = null;
+
+/** Drops the screensaver subscription (best effort). Called before the
+ *  app closes so the tvpower service isn't left mid-handshake. */
+function cancelScreenSaverBridge() {
+  if (!screenSaverBridge) return;
+  try {
+    screenSaverBridge.cancel();
+  } catch (e) {
+    console.error("Could not cancel the screensaver subscription:", e);
+  }
+  screenSaverBridge = null;
+}
+
 function suppressScreenSaverViaLuna() {
   if (typeof WebOSServiceBridge === "undefined") return; // not running on a real webOS TV
 
   try {
     const bridge = new WebOSServiceBridge();
+    screenSaverBridge = bridge;
     bridge.onservicecallback = (msg) => {
       let message;
       try {

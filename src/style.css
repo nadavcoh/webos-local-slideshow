@@ -250,9 +250,32 @@ html, body {
   background: rgba(0, 0, 0, 0.6);
 }
 
+/* One visible panel at a time (main menu, or the log-out confirmation);
+   same stacking as .menu-overlay itself. */
+.menu-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.8rem;
+}
+
 .menu-card {
   display: flex;
   gap: 1.5rem;
+}
+
+.menu-prompt {
+  font-size: 2rem;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  color: var(--fg);
+}
+
+.menu-subprompt {
+  margin-top: -1rem;
+  font-size: 1.1rem;
+  font-weight: 300;
+  color: var(--fg-dim);
 }
 
 .menu-btn {
