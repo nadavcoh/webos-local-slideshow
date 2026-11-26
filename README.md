@@ -52,7 +52,7 @@ webos-photos-slideshow/
 │   ├── heic-worker.js               ← off-main-thread HEIC→JPEG decode (see CLAUDE.md "HEIC photos")
 │   ├── vendor/libheif/               ← vendored WASM build of libheif used by heic-worker.js
 │   └── secrets.local.js.example     ← copy to secrets.local.js (gitignored) for local testing
-├── .github/workflows/          ← deploy-webos.yml (package + deploy to the TV over Tailscale) and deploy-repo.yml (publish a homebrew repo to Vercel)
+├── .github/workflows/          ← deploy-repo.yml (builds the .ipk and publishes the homebrew repo the TV installs from); the old deploy-webos.yml (push to the TV over Tailscale) was removed, see section 6 (historical)
 ├── server/                      ← LAN photo server — runs on a machine in your home LAN, NOT packaged/deployed by anything above
 │   ├── photo_serve.py             serves photo bytes; disambiguates duplicate filenames via ?hash_id= (see CLAUDE.md)
 │   ├── photo_serve_dryrun.py      read-only: reports every duplicate-filename group + what the resolver would pick, without running the server
@@ -206,10 +206,10 @@ handoff/poll endpoints and the sign-in page.
 
 ## 2. Configure the TV app
 
-**If you're deploying via the GitHub Action (section 5 below), skip
-this** — leave the placeholders in `src/app.js` as-is; the workflow
-substitutes them from repo secrets at build time, and drops `vendor`
-into `appinfo.json` automatically too.
+**If you're deploying via the homebrew repo workflow (`deploy-repo.yml`,
+section 6e below), skip this** — leave the placeholders in `src/app.js`
+as-is; the workflow substitutes them from repo secrets at build time, and
+drops `vendor` into `appinfo.json` automatically too.
 
 For manual/local packaging, or for testing locally in a browser (see
 "Testing locally" below), copy `src/secrets.local.js.example` to
@@ -334,7 +334,8 @@ ares-novacom --device livingroom-tv --getkey --passphrase <passphrase-shown-on-T
 you're following an old note or blog post that mentions
 `.novacom-cert`, that's why it no longer matches).
 
-Base64-encode it for the `WEBOS_TV_SSH_KEY_B64` secret:
+Base64-encode it for the `WEBOS_TV_SSH_KEY_B64` secret (historical: only the
+removed `deploy-webos.yml` used it; the homebrew repo does not need it):
 
 **macOS:**
 ```bash
@@ -357,11 +358,21 @@ the Developer Mode app on the TV; the derived key stops working once the
 session lapses and you'll need to regenerate it via the commands above
 with a fresh passphrase.
 
-## 6. Automatic deploys via GitHub Actions (`.github/workflows/deploy-webos.yml`)
+## 6. Automatic deploys via GitHub Actions
 
-The workflow packages the app, joins your tailnet, and pushes the result
-straight to the TV on every push to `main` that touches a file under
-`src/`. Set up these secrets first:
+> **Historical: `deploy-webos.yml` was removed (2026-11-26).** It packaged the
+> app, joined your tailnet and pushed the `.ipk` straight to the TV on every
+> push to `main` that touched `src/`. Its last successful run was on
+> 2026-11-06 (3304065); the run after that failed at the TV reachability check,
+> and the workflow was then deleted. The TV is now updated through the
+> homebrew repo published by `deploy-repo.yml` (section 6e below).
+>
+> Subsections a and b below (Tailscale, TV pairing key, `TS_OAUTH_*`,
+> `WEBOS_TV_*`, `TV_PASSPHRASE`) are kept for reference only, and those repo
+> secrets are no longer used. Subsections c and d (app config secrets, the
+> encrypted icon) still apply, because `deploy-repo.yml` reuses them.
+
+The removed workflow's secrets were:
 
 ### a) Tailscale reachability
 
@@ -526,14 +537,15 @@ diverged from a "textbook" version in a few deliberate ways:
   files anyway (gitignored), but keeps a stray local file from ever
   ending up in a manually-built `.ipk` either.
 
-### e) Publishing a webOS homebrew repo (`deploy-repo.yml`, optional)
+### e) Publishing a webOS homebrew repo (`deploy-repo.yml`, current)
 
-A separate workflow, `.github/workflows/deploy-repo.yml`, builds the same
-`.ipk` and publishes it together with a generated `apps.json` to a Vercel
-project behind HTTP Basic Auth, so it can be added as a webOS homebrew
-repository. It never touches the TV. It runs on pushes to `main` that change
-`src/**` (alongside `deploy-webos.yml`) and can be started manually from the
-Actions tab.
+The workflow `.github/workflows/deploy-repo.yml` builds the `.ipk` and
+publishes it together with a generated `apps.json` to a Vercel project behind
+HTTP Basic Auth, so it can be added as a webOS homebrew repository. This is how
+the TV gets the app now (it replaced `deploy-webos.yml`, section 6 above). The
+workflow never touches the TV itself: install or update the app from the
+Homebrew Channel on the TV. It runs on pushes to `main` that change `src/**`
+and can be started manually from the Actions tab.
 
 Setup: create an empty Vercel project for it, add the GitHub secrets
 `VERCEL_TOKEN`, `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID`, and set
