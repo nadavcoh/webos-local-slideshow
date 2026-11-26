@@ -227,12 +227,12 @@ window.APP_CONFIG = {
 ```
 
 `src/app.js` reads this at runtime — `window.APP_CONFIG` if present,
-otherwise its own placeholder strings (which is what the GitHub Action
-replaces for real builds).
+otherwise its own placeholder strings (which is what the `deploy-repo.yml`
+workflow replaces for real builds).
 
 Also update `src/appinfo.json` → `"id"` to your own reverse-domain app
 ID (e.g. `com.yourname.ambientphotos`) if packaging manually — the
-GitHub Action sets this (and `vendor`) for you.
+`deploy-repo.yml` sets this (and `vendor`) for you.
 
 ## Testing locally in Chrome
 
@@ -281,6 +281,10 @@ ares-setup-device
 ```
 
 ## 4. Package and install
+
+The usual route is the Homebrew Channel on the TV, which installs from the repo
+that `deploy-repo.yml` publishes (section 6e). Installing by hand with the webOS
+CLI, as below, still works for development.
 
 ```bash
 ares-package src --no-minify
@@ -489,9 +493,10 @@ isn't in the repo, or `ICON_DECRYPT_PASSPHRASE` isn't set, this step
 is skipped and the committed generic placeholder ships instead — this
 is entirely optional.
 
-### Changes made to the default workflow, for future reference
+### Changes made to the default workflow, for future reference (historical)
 
-If you're picking this project back up after a while, the workflow has
+If you're picking this project back up after a while, the removed
+`deploy-webos.yml` had
 diverged from a "textbook" version in a few deliberate ways:
 
 - **`@webos-tools/cli`**, not `@webosose/ares-cli` — the latter is the
