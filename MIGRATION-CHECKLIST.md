@@ -5,7 +5,7 @@
 > the boxes below are intentionally not ticked. What is still open is listed in
 > `CLAUDE.md` under "Open items".
 >
-> **Update (2026-11-26):** `.github/workflows/deploy-webos.yml` (mentioned in
+> **Update (2026-11-25):** `.github/workflows/deploy-webos.yml` (mentioned in
 > sections 3 to 5) was removed; the TV now installs from the homebrew repo
 > published by `deploy-repo.yml`. Treat the Tailscale/TV secrets and the
 > "Action packages and installs" test step as historical.
