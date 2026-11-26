@@ -502,8 +502,8 @@ loads whatever static files this app's own deploy already installed.
 `src/app.js` reads `window.APP_CONFIG` if present, else falls back to
 placeholder strings. `src/index.html` loads `secrets.local.js`
 (gitignored via the repo's `*secret*` pattern) right before `app.js`.
-Missing file → harmless 404 → placeholders stay in effect. The GitHub
-Action never touches this file; it does its own placeholder
+Missing file → harmless 404 → placeholders stay in effect. The
+`deploy-repo.yml` workflow never touches this file; it does its own placeholder
 substitution directly into `app.js` at build time from repo secrets.
 Current placeholders (post-migration):
 
