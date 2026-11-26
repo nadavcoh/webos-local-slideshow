@@ -786,13 +786,26 @@ async function resolveAndPreload(meta) {
  *  shown. Image resolution/preload and geocoding are independent
  *  network calls to different services, so they run concurrently
  *  rather than one after another. */
-async function fetchAndPreloadOne() {
+async function fetchAndPreloadOne({ blockOnGeocode = true } = {}) {
   const meta = await fetchRandomPhoto();
   const coords = metaCoords(meta);
-  const [, geocodedPlace] = await Promise.all([
-    resolveAndPreload(meta),
-    coords ? reverseGeocode(coords) : Promise.resolve(null),
-  ]);
+  const geocodePromise = coords ? reverseGeocode(coords) : Promise.resolve(null);
+
+  if (!blockOnGeocode) {
+    // First-photo fast path: Nominatim is throttled to ~1 req/sec and can
+    // be slow, and the image doesn't depend on it. Show the photo as soon
+    // as it's loaded; the place name fills into the overlay when it lands.
+    geocodePromise.then((place) => {
+      meta.geocodedPlace = place;
+      if (history[historyIndex] === meta) {
+        el.overlayLocation.textContent = formatLocation(meta);
+      }
+    });
+    await resolveAndPreload(meta);
+    return meta;
+  }
+
+  const [, geocodedPlace] = await Promise.all([resolveAndPreload(meta), geocodePromise]);
   meta.geocodedPlace = geocodedPlace;
   return meta;
 }
@@ -822,10 +835,10 @@ async function topUpQueue() {
 /** Returns the next not-yet-shown photo: from the prefetch queue if
  *  it's ready, or fetched inline as a fallback (e.g. right at boot,
  *  before the first top-up has had time to finish). */
-async function takeNextUpcoming() {
+async function takeNextUpcoming({ fast = false } = {}) {
   if (upcoming.length > 0) return upcoming.shift();
   try {
-    return await fetchAndPreloadOne();
+    return await fetchAndPreloadOne({ blockOnGeocode: !fast });
   } catch (err) {
     console.error("Failed to fetch next photo:", err);
     return null;
@@ -861,7 +874,7 @@ async function renderPhoto(meta) {
   return true;
 }
 
-async function showNextSlide() {
+async function showNextSlide({ fast = false } = {}) {
   let meta;
   let consumedFromQueue = false;
 
@@ -871,8 +884,8 @@ async function showNextSlide() {
     historyIndex++;
     meta = history[historyIndex];
   } else {
-    meta = await takeNextUpcoming();
-    if (!meta) return; // next timer tick retries
+    meta = await takeNextUpcoming({ fast });
+    if (!meta) return false; // next timer tick retries
     consumedFromQueue = true;
     history.push(meta);
     // Evicting from history is the one place a shown photo is truly
@@ -883,7 +896,8 @@ async function showNextSlide() {
 
   const ok = await renderPhoto(meta);
   if (consumedFromQueue) topUpQueue(); // fire-and-forget; refill what was just consumed
-  if (!ok) showNextSlide(); // skip a broken row, try another immediately
+  if (!ok) return showNextSlide({ fast }); // skip a broken row, try another immediately
+  return true;
 }
 
 async function showPrevSlide() {
@@ -943,9 +957,11 @@ function stopClock() {
 function startSlideshow() {
   showScreen("slideshow");
   startClock();
-  topUpQueue(); // fire-and-forget; fills in parallel with the first fetch below
-  showNextSlide();
   restartSlideTimer();
+  // First photo gets the network to itself (no competing prefetch, no
+  // waiting on geocoding); only once it's on screen do we start
+  // filling the prefetch queue.
+  showNextSlide({ fast: true }).finally(() => topUpQueue());
 }
 
 /* ============================================================
