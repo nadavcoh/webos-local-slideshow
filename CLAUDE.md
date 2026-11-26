@@ -14,8 +14,10 @@ overlay (name/street/neighbourhood/city/country, all levels Nominatim
 returns — see "Reverse geocoding is deliberately maximal" below), plus
 an optional wa-id + filename overlay, on by default — see
 `CONFIG.SHOW_FILENAME_OVERLAY`, mainly useful while debugging (also
-see `window.debugShowPhoto()`, below). Deployed via a GitHub Action
-that packages the app and pushes it to the TV over Tailscale.
+see `window.debugShowPhoto()`, below). Installed on the TV from a
+webOS homebrew repo that `deploy-repo.yml` publishes; the earlier Action that
+pushed the app to the TV over Tailscale (`deploy-webos.yml`) was removed on
+2026-11-26 — see "Removed workflow: `deploy-webos.yml` (historical)" below.
 
 ## Architecture, and why it isn't the Google Photos thing anymore
 
@@ -108,8 +110,8 @@ server/                 ← LAN photo server, run manually on whichever machine 
   photo_serve_dryrun.py    read-only: reports every collision + what the resolver would pick, no server needed
   requirements.txt          Python deps for both scripts (Pillow>=9.4, pillow-heif, psycopg2-binary); `pip install -r server/requirements.txt`. Keep it in sync if either script gains a third-party import
   config.json               (repo owner adds this, gitignored) direct Postgres credentials - same shape as phash's own config.json, NOT the Supabase anon key
-.github/workflows/deploy-webos.yml   ← package + Tailscale + install to TV
-.github/workflows/deploy-repo.yml    ← standalone: package + publish .ipk + apps.json to Vercel behind Basic Auth (never touches the TV)
+.github/workflows/deploy-repo.yml    ← package + publish .ipk + apps.json to Vercel behind Basic Auth; the TV installs from this homebrew repo (the workflow never touches the TV)
+                           (deploy-webos.yml, the old Tailscale push to the TV, was removed 2026-11-26 — historical)
 pairing-backend/        ← RETIRED — superseded by webapp/api/auth/*, safe to delete
                            once the new flow is confirmed working end-to-end
 ```
@@ -343,13 +345,14 @@ reuse `overlayDate` for it — they mean different things.
 
 ## Homebrew repo workflow (`deploy-repo.yml`)
 
-Added 2026-11-07. A second, standalone workflow that publishes the app as a
-webOS homebrew repo; it never touches the TV and never commits `apps.json`.
-Triggers: push to `main` under `src/**` (or to the workflow file) and manual
-`workflow_dispatch` — so a `src/` push runs this *and* `deploy-webos.yml`.
+Added 2026-11-07. Since 2026-11-26 this is the only deploy workflow: it
+publishes the app as a webOS homebrew repo that the TV installs from (it never
+touches the TV and never commits `apps.json`). Triggers: push to `main` under
+`src/**` (or to the workflow file) and manual `workflow_dispatch`.
 
-Steps: build the `.ipk` exactly like `deploy-webos.yml` (same placeholder
-injection into `app.js`/`appinfo.json`, same optional icon decrypt) → generate
+Steps: build the `.ipk` (placeholder injection into `app.js`/`appinfo.json` and
+the optional icon decrypt, the same packaging steps the removed
+`deploy-webos.yml` used) → generate
 `apps.json` from `appinfo.json` (sha256 and size of the `.ipk`, `ipkUrl`
 relative to `apps.json`, icon embedded as a data URI) → write a Basic Auth
 `middleware.js` into `dist/` (credentials are read at runtime from the Vercel
@@ -382,6 +385,29 @@ Hosting facts (as of 2026-11-21):
   trailing space in the `VERCEL_PROJECT_ID` secret (visible as `*** ` in the log)
   — now handled by the trim step. A first run also fails at the deploy step until
   the project and the three secrets exist.
+
+## Removed workflow: `deploy-webos.yml` (historical)
+
+`.github/workflows/deploy-webos.yml` ("Deploy Ambient Photos to webOS TV") was
+deleted on 2026-11-26 (commit `df8633e`). It packaged the app, joined the
+tailnet (`tailscale/github-action`, tag `tag:github-actions`), reached the TV
+through a LAN subnet router, registered it with `ares-setup-device` and ran
+`ares-install` on every push to `main` touching `src/` files (and on manual
+dispatch). Its last successful deploy was commit `3304065` (November 2026). The
+run for `d7c8a2e` (a comment-only edit in `src/app.js`) failed on 2026-11-18 at
+the "Confirm the TV is reachable" step (TV off or Developer Mode lapsed), and
+the workflow was removed instead of being fixed.
+
+- The TV now gets updates from the homebrew repo (`deploy-repo.yml`, above).
+  Don't re-add a push-to-TV workflow without asking.
+- Repo secrets only that workflow used, now unused and safe to delete in GitHub:
+  `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `WEBOS_TV_SSH_KEY_B64`,
+  `WEBOS_TV_HOST`, `TV_PASSPHRASE`. The Tailscale OAuth client and the
+  `tag:github-actions` ACL tag in the Tailscale admin console can go too.
+- To read it: `git show df8633e^:.github/workflows/deploy-webos.yml`. The README
+  (section 6) keeps its setup notes, marked historical.
+- `.github/STEP4-NOTES.md` and `MIGRATION-CHECKLIST.md` mention it; both are old
+  historical notes.
 
 ## Debugging console helpers
 
@@ -663,7 +689,9 @@ GitHub account").
   (migrations `20261110120000` and `20261117120000`), and `webapp/app/api/auth/tv-handoff/route.js` now checks the
   GitHub identity id instead of an e-mail. On the TV: pair, confirm photos and
   locations still load, and that the "Use a different GitHub account" button
-  works.
+  works. Builds reach the TV through the Homebrew Channel now (see the removed
+  workflow section above), so install/update the app there first if `src/`
+  changed.
 
 - **Run `server/photo_serve.py`** on the LAN machine in place of the
   plain `python -m http.server` it's replacing — see "Duplicate
@@ -686,13 +714,13 @@ GitHub account").
   of this writing — retire them once the new flow is confirmed working
   end-to-end on the real TV.
 - Full secret/env-var inventory (current):
-  - **GitHub repo secrets**: `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`,
-    `WEBOS_TV_SSH_KEY_B64`, `WEBOS_TV_HOST`, `TV_PASSPHRASE`,
-    `WEBOS_APP_ID`, `WEBAPP_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
-    `PHOTO_SERVER_URL`
-  - **GitHub repo secrets for `deploy-repo.yml`** (in addition to the above):
+  - **GitHub repo secrets used by `deploy-repo.yml`**: `WEBOS_APP_ID`,
+    `WEBAPP_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `PHOTO_SERVER_URL`,
     `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` (the Vercel project
     that hosts the homebrew repo), optionally `ICON_DECRYPT_PASSPHRASE`
+  - **GitHub repo secrets no longer used** (only the removed `deploy-webos.yml`
+    read them; delete when convenient): `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`,
+    `WEBOS_TV_SSH_KEY_B64`, `WEBOS_TV_HOST`, `TV_PASSPHRASE`
   - **Vercel (homebrew repo project) env vars**: `REPO_USERNAME`,
     `REPO_PASSWORD` (HTTP Basic Auth; the middleware fails closed with a 500 if
     they are missing)
