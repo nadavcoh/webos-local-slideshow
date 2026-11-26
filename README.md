@@ -288,9 +288,9 @@ CLI, as below, still works for development.
 
 ```bash
 ares-package src --no-minify
-# produces com.yourdomain.ambientphotos_1.0.0_all.ipk
+# produces com.yourdomain.ambientphotos_1.0.1_all.ipk
 
-ares-install -d livingroom-tv com.yourdomain.ambientphotos_1.0.0_all.ipk
+ares-install -d livingroom-tv com.yourdomain.ambientphotos_1.0.1_all.ipk
 
 ares-launch -d livingroom-tv com.yourdomain.ambientphotos
 ```
