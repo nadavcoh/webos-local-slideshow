@@ -362,9 +362,9 @@ with a fresh passphrase.
 
 > **Historical: `deploy-webos.yml` was removed (2026-11-26).** It packaged the
 > app, joined your tailnet and pushed the `.ipk` straight to the TV on every
-> push to `main` that touched `src/`. Its last successful run was on
-> 2026-11-06 (3304065); the run after that failed at the TV reachability check,
-> and the workflow was then deleted. The TV is now updated through the
+> push to `main` that touched `src/`. Its last successful deploy was commit
+> `3304065` (November 2026); the run after that failed at the TV reachability
+> check, and the workflow was then deleted. The TV is now updated through the
 > homebrew repo published by `deploy-repo.yml` (section 6e below).
 >
 > Subsections a and b below (Tailscale, TV pairing key, `TS_OAUTH_*`,
