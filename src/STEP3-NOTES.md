@@ -1,5 +1,10 @@
 # Step 3 — webOS TV client rewrite
 
+> **Historical:** a build log from the Google Photos to Supabase/KV cutover. The
+> "Next steps" at the end were done long ago, and the workflow it mentions
+> (`deploy-webos.yml`) was removed on 2026-11-25. Current docs: `README.md` and
+> `CLAUDE.md`.
+
 Replaces every Google Photos Picker call and the old pairing-backend
 polling with the Supabase/KV handoff from Steps 1–2, plus the new
 `wa`/`hashes`-driven random photo fetching. Builds on the `WEBAPP_URL`
