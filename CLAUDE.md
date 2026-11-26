@@ -589,6 +589,17 @@ structured even though the specific APIs are gone:
   `renderPhoto()`/`formatLocation()` even for a "quick fix" — that
   would reintroduce exactly the latency the prefetch queue exists to
   avoid.
+- **Startup latency: the first photo takes a fast path.** At boot,
+  `startSlideshow()` calls `showNextSlide({ fast: true })` and only
+  starts `topUpQueue()` after that first photo is on screen. `fast`
+  makes `fetchAndPreloadOne({ blockOnGeocode: false })` skip waiting
+  on Nominatim (throttled ~1 req/sec): the photo renders as soon as its
+  image is loaded, and the late `geocodedPlace` is patched into the
+  overlay if that photo is still current. Previously the first slide
+  waited on geocoding AND competed with the prefetch queue's own
+  fetches/geocodes, causing a several-second black screen with only the
+  clock. Every later slide still uses the prefetch queue (geocoded
+  ahead of time), so the rule above still holds for them.
 - **Reverse geocoding is deliberately maximal, not "smart."**
   `zoom=18` (confirmed against Nominatim's own docs — 0-18, 18 is
   building-level and is actually their own default) asks for the most
