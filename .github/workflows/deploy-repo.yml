@@ -1,8 +1,10 @@
 name: Deploy webOS Homebrew Repo to Vercel
 
-# Standalone workflow: builds the .ipk exactly like deploy-webos.yml does,
-# then publishes it (plus a generated apps.json) to Vercel behind HTTP
-# Basic Auth. It does NOT touch the TV and never commits apps.json.
+# Builds the .ipk and publishes it (plus a generated apps.json) to Vercel
+# behind HTTP Basic Auth, so the TV can install it as a webOS homebrew repo.
+# It does NOT touch the TV and never commits apps.json. (It replaced the old
+# deploy-webos.yml, which pushed the app to the TV over Tailscale and was
+# removed on 2026-11-25.)
 on:
   push:
     branches: [main]
@@ -25,13 +27,13 @@ jobs:
         with:
           node-version: "24"
 
-      # NOTE: the existing deploy-webos.yml installs the CLI from
-      # @webos-tools/cli (provides ares-package), which is the proven package.
+      # @webos-tools/cli provides ares-package (the maintained package; the
+      # older @webosose/ares-cli is not used).
       - name: Install webOS CLI and Vercel CLI
         run: npm install -g @webos-tools/cli vercel
 
-      # Same config injection as deploy-webos.yml, so the packaged app and
-      # its id match what gets installed on the TV.
+      # Inject the repo-secret config into the placeholders in app.js and
+      # appinfo.json, so the packaged app and its id match what the TV installs.
       - name: Inject config into app.js and appinfo.json
         env:
           WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
