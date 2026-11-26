@@ -360,7 +360,7 @@ with a fresh passphrase.
 
 ## 6. Automatic deploys via GitHub Actions
 
-> **Historical: `deploy-webos.yml` was removed (2026-11-26).** It packaged the
+> **Historical: `deploy-webos.yml` was removed (2026-11-25).** It packaged the
 > app, joined your tailnet and pushed the `.ipk` straight to the TV on every
 > push to `main` that touched `src/`. Its last successful deploy was commit
 > `3304065` (November 2026); the run after that failed at the TV reachability
